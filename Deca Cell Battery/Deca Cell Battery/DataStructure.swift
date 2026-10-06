@@ -1,4 +1,3 @@
-
 //
 //  DataStructure.swift
 //  Deca Cell Battery
@@ -9,13 +8,13 @@
 import Foundation
 
 // ============================================================
-// MARK: - QRTL Constants
+// MARK: - QRTL CONSTANTS
 // ============================================================
 
 struct QRTLConstants {
 
     // ========================================================
-    // Targets
+    // MARK: Targets
     // ========================================================
 
     static let targetEnergyKWh = 600.0
@@ -30,7 +29,7 @@ struct QRTLConstants {
     static let maximumStressMPa = 900.0
 
     // ========================================================
-    // Topology
+    // MARK: Cell Topology
     // ========================================================
 
     static let seriesCells = 450
@@ -42,23 +41,22 @@ struct QRTLConstants {
     static let cellNominalVoltageV = 2.22
 
     // ========================================================
-    // Physical Constants
+    // MARK: Physical Constants
     // ========================================================
 
     static let faraday = 96_485.33212
-
-    // Compatibility alias used internally by the engine.
     static let faradayConstant = faraday
 
     static let gasConstant = 8.314462618
 
     static let sulfurMolarMassKgMol = 0.032065
     static let sulfurElectrons = 2.0
+    
 
     static let sulfurTheoreticalAhKg =
         sulfurElectrons *
         faraday /
-        sulfurMolarMassKgMol /
+    sulfurMolarMassKgMol /
         3600.0
 
     static let lithiumSpecificCapacityAhKg = 3_860.0
@@ -66,16 +64,16 @@ struct QRTLConstants {
     static let sulfurUtilization = 0.95
 
     // ========================================================
-    // Cell Material Design
+    // MARK: Cell Material Design
     // ========================================================
 
     static let sulfurMassPerCellKg = 0.0632
 
-    // 4 mAh/cm² loading.
+    // 4 mAh/cm² = 40 Ah/m²
     static let arealCapacityAhM2 = 40.0
 
     // ========================================================
-    // Derived Cell / Pack Quantities
+    // MARK: Derived Electrical Values
     // ========================================================
 
     static let cellCapacityAh =
@@ -100,6 +98,10 @@ struct QRTLConstants {
         cellCapacityAh /
         arealCapacityAhM2
 
+    // ========================================================
+    // MARK: 1 MW Charging Station
+    // ========================================================
+
     static let targetPackCurrentA =
         targetChargePowerW /
         packVoltageV
@@ -109,54 +111,45 @@ struct QRTLConstants {
         Double(parallelStrings)
 
     // ========================================================
-    // Reduced-Order Electrochemical Parameters
+    // MARK: Reduced-Order Electrochemistry
     // ========================================================
 
     static let electronicConductivitySm = 5.0e4
-
     static let ionicConductivitySm = 0.6
 
     static let lithiumDiffusivityM2s = 2.0e-11
-
     static let sulfurDiffusivityScale = 1.0
 
     static let referenceExchangeCurrentAm2 = 25.0
 
     static let chargeTransferCoefficient = 0.5
 
-    static let exchangeCurrentActivationEnergyJMol =
-        30_000.0
+    static let exchangeCurrentActivationEnergyJMol = 30_000.0
 
     static let entropicCoefficientVPerK = -0.0002
 
     static let electrolyteThicknessM = 25e-6
-
     static let electrodeThicknessM = 100e-6
 
     static let effectiveElectrodePorosity = 0.55
-
     static let tortuosity = 2.0
 
     static let conductorResistivityOhmM = 2.82e-8
-
     static let conductorLengthM = 0.10
-
     static let conductorAreaM2 = 1e-4
 
     static let interfaceResistanceOhmPerCell = 10e-6
 
     // ========================================================
-    // Resonator
+    // MARK: Resonator
     // ========================================================
 
     static let resonanceFrequencyHz = 1_000_000.0
-
     static let resonatorDesignFrequencyHz = 1_000_000.0
 
     static let qualityFactor = 2_500.0
 
     static let resonatorDrivePowerFraction = 0.005
-
     static let resonatorCouplingEfficiency = 0.95
 
     static let resonatorMassPerCellKg = 0.002
@@ -179,19 +172,15 @@ struct QRTLConstants {
     static let piezoCouplingCoefficient = 0.12
 
     // ========================================================
-    // Mass Model
+    // MARK: Mass
     // ========================================================
 
     static let collectorAreaM2 = 0.025
-
     static let collectorThicknessM = 10e-6
-
     static let collectorDensityKgM3 = 2_700.0
-
     static let collectorsPerCell = 2.0
 
     static let tpmsCellVolumeM3 = 1.0e-5
-
     static let tpmsRelativeDensity = 0.05
 
     static let tpmsMaterialDensityKgM3 = 4_420.0
@@ -199,7 +188,6 @@ struct QRTLConstants {
     static let tpmsThermalAreaM2PerCell = 0.10
 
     static let carbonToSulfurMassRatio = 0.05
-
     static let electrolyteToSulfurMassRatio = 0.06
 
     static let packagingMassKgPerCell = 0.003
@@ -207,12 +195,11 @@ struct QRTLConstants {
     static let packOverheadFraction = 0.05
 
     // ========================================================
-    // Thermal
+    // MARK: Thermal
     // ========================================================
 
     static let heatTransferCoefficientWm2K = 250.0
 
-    // Compatibility name used by the engine.
     static let thermalConvectionCoefficientWm2K =
         heatTransferCoefficientWm2K
 
@@ -225,43 +212,36 @@ struct QRTLConstants {
     static let caSliceDepthM = 0.01
 
     // ========================================================
-    // Mechanics
+    // MARK: Mechanics
     // ========================================================
 
     static let youngsModulusPa = 110e9
+    static let mechanicalModulusPa = youngsModulusPa
 
-    // Compatibility name used by the engine.
-    static let mechanicalModulusPa =
-        youngsModulusPa
-
-    // ========================================================
-    // Thermal Expansion
-    // ========================================================
-
-    static let thermalExpansionCoefficientPerK =
-        23.1e-6
+    static let thermalExpansionCoefficientPerK = 23.1e-6
 
     // ========================================================
-    // Degradation
+    // MARK: Degradation
     // ========================================================
 
-    static let degradationCoefficientPerCycle =
-        0.000002
+    static let degradationCoefficientPerCycle = 0.000002
 
     // ========================================================
-    // Cellular Automaton
+    // MARK: CA
     // ========================================================
 
     static let caWidth = 31
-
     static let caHeight = 31
 
-    static let caIterations = 240
+    static let caIterations =  2160
 
-    static let simSecondsPerStep = 1.0
+    // Numerical timestep.
+    //
+    // This is NOT the wall-clock runtime of the computer.
+    // It represents physical time represented by each CA step.
+    static let simSecondsPerStep = 60 * 60 * 0.10
 
     static let caTransportCoefficient = 0.18
-
     static let caAcceptanceModulation = 0.25
 
     static let caCellLengthM = 0.001
@@ -273,7 +253,6 @@ struct QRTLConstants {
     static let chargeCompleteSOC = 0.999
 }
 
-
 // ============================================================
 // MARK: - Math Helpers
 // ============================================================
@@ -284,42 +263,18 @@ func clamp(
     _ lo: Double,
     _ hi: Double
 ) -> Double {
-
-    min(
-        max(x, lo),
-        hi
-    )
+    min(max(x, lo), hi)
 }
-
 
 @inline(__always)
-func safeExp(
-    _ x: Double
-) -> Double {
-
-    exp(
-        clamp(
-            x,
-            -50.0,
-            50.0
-        )
-    )
+func safeExp(_ x: Double) -> Double {
+    exp(clamp(x, -50.0, 50.0))
 }
-
 
 @inline(__always)
-func safeLog(
-    _ x: Double
-) -> Double {
-
-    log(
-        max(
-            x,
-            1e-12
-        )
-    )
+func safeLog(_ x: Double) -> Double {
+    log(max(x, 1e-12))
 }
-
 
 // ============================================================
 // MARK: - CA Cell
@@ -327,18 +282,18 @@ func safeLog(
 
 struct QRTLCAChargeCell: Identifiable {
 
-    let id = UUID()
+    let id: UUID
 
-    var x: Int = 0
-    var y: Int = 0
+    var x: Int
+    var y: Int
 
     // ========================================================
-    // TPMS Geometry
+    // TPMS
     // ========================================================
 
     var phiTPMS: Double = 0.0
 
-    var solidFraction: Double = 0.0
+    var solidFraction: Double = 0.25
 
     var tortuosity: Double =
         QRTLConstants.tortuosity
@@ -347,14 +302,15 @@ struct QRTLCAChargeCell: Identifiable {
         QRTLConstants.effectiveElectrodePorosity
 
     // ========================================================
-    // Electrochemical State
+    // Electrochemical
     // ========================================================
 
     var soc: Double = 0.0
 
-    var lithiumConcentration: Double = 0.5
+    var lithiumConcentration: Double =
+        QRTLConstants.tabReservoirConcentration
 
-    var sulfurFraction: Double = 0.001
+    var sulfurFraction: Double = 1.0
 
     var lithiumIonFlux: Double = 0.0
 
@@ -362,34 +318,24 @@ struct QRTLCAChargeCell: Identifiable {
 
     var reactionRate: Double = 0.0
 
-    var exchangeCurrentDensity: Double =
-        QRTLConstants.referenceExchangeCurrentAm2
+    var exchangeCurrentDensity: Double = 0.0
 
     var overpotentialV: Double = 0.0
 
-    var equilibriumVoltageV =
-        QRTLConstants.cellNominalVoltageV
+    var equilibriumVoltageV: Double = 2.22
 
-    var localVoltageV =
-        QRTLConstants.cellNominalVoltageV
+    var localVoltageV: Double = 2.22
 
-    var impedanceOhm: Double = 0.0
-
-    // ========================================================
-    // NEW:
-    // Electrolyte electric potential.
-    //
-    // This is deliberately separate from
-    // equilibriumVoltageV.
-    // ========================================================
+    var impedanceOhm: Double =
+        QRTLConstants.interfaceResistanceOhmPerCell
 
     var electrolytePotentialV: Double = 0.0
 
     // ========================================================
-    // Thermal State
+    // Thermal
     // ========================================================
 
-    var temperatureC =
+    var temperatureC: Double =
         QRTLConstants.ambientTemperatureC
 
     var heatGenerationW: Double = 0.0
@@ -397,7 +343,7 @@ struct QRTLCAChargeCell: Identifiable {
     var heatFluxWm2: Double = 0.0
 
     // ========================================================
-    // Mechanical State
+    // Mechanical
     // ========================================================
 
     var strain: Double = 0.0
@@ -405,7 +351,7 @@ struct QRTLCAChargeCell: Identifiable {
     var stressPa: Double = 0.0
 
     // ========================================================
-    // Resonator State
+    // Resonator
     // ========================================================
 
     var resonanceAmplitudeM: Double = 0.0
@@ -430,10 +376,7 @@ struct QRTLCAChargeCell: Identifiable {
     // State
     // ========================================================
 
-    var state: CellState = .empty
-
-    enum CellState {
-
+    enum State: String {
         case empty
         case receiving
         case reacting
@@ -441,8 +384,19 @@ struct QRTLCAChargeCell: Identifiable {
         case thermal
         case damaged
     }
-}
 
+    var state: State = .empty
+
+    init(
+        id: UUID = UUID(),
+        x: Int,
+        y: Int
+    ) {
+        self.id = id
+        self.x = x
+        self.y = y
+    }
+}
 
 // ============================================================
 // MARK: - Transport Helpers
@@ -453,16 +407,9 @@ func transportFactor(
     _ c: QRTLCAChargeCell
 ) -> Double {
 
-    max(
-        c.porosity,
-        0.05
-    ) /
-    max(
-        c.tortuosity,
-        1.0
-    )
+    max(c.porosity, 0.05) /
+    max(c.tortuosity, 1.0)
 }
-
 
 @inline(__always)
 func effectiveDiffusivity(
@@ -470,14 +417,10 @@ func effectiveDiffusivity(
 ) -> Double {
 
     QRTLConstants.lithiumDiffusivityM2s /
-    max(
-        c.tortuosity,
-        1.0
-    ) *
+    max(c.tortuosity, 1.0) *
     c.porosity *
     QRTLConstants.sulfurDiffusivityScale
 }
-
 
 // ============================================================
 // MARK: - Design Result
@@ -486,37 +429,28 @@ func effectiveDiffusivity(
 struct QRTLDesignResult {
 
     // ========================================================
-    // Cell / Pack Capacity
+    // Capacity / Mass
     // ========================================================
 
     var cellCapacityAh = 0.0
 
     var sulfurMassKg = 0.0
-
     var lithiumMassKg = 0.0
-
     var carbonMassKg = 0.0
-
     var electrolyteMassKg = 0.0
-
     var collectorMassKg = 0.0
-
     var tpmsMassKg = 0.0
-
     var resonatorMassKg = 0.0
-
     var packagingMassKg = 0.0
 
     var packMassKg = 0.0
 
     var ratedEnergyKWh = 0.0
-
     var usableEnergyKWh = 0.0
 
     var specificEnergyWhKg = 0.0
 
     var packVoltageV = 0.0
-
     var packCapacityAh = 0.0
 
     // ========================================================
@@ -526,28 +460,19 @@ struct QRTLDesignResult {
     var totalResistanceOhm = 0.0
 
     var ohmicLossW = 0.0
-
     var reactionLossW = 0.0
-
-    // Signed reversible heat.
-    // Negative = endothermic during charging.
-
     var entropicHeatW = 0.0
-
     var resonatorLossW = 0.0
-
-    // Heat rejected to coolant.
-
     var thermalLossW = 0.0
-
-    // Irreversible losses only.
 
     var totalLossW = 0.0
 
-    var efficiency = 0.0
+    var efficiency = 1.0
 
+    // Charging station input.
     var modeledChargePowerW = 0.0
 
+    // Maximum modeled station power capability.
     var powerCapabilityW = 0.0
 
     var chargeTimeHours = 0.0
@@ -561,17 +486,20 @@ struct QRTLDesignResult {
     var tpmsSurfaceAreaM2 = 0.0
 
     var tpmsPorosity = 0.0
-    var  tpmsSolidFraction = 0.25
 
-    var tpmsRelativeDensity = 0.0
+    var tpmsSolidFraction = 0.25
+
+    var tpmsRelativeDensity =
+        QRTLConstants.tpmsRelativeDensity
 
     // ========================================================
-    // Electrochemical Metrics
+    // Electrochemical
     // ========================================================
 
     var averageSOC = 0.0
 
-    var sulfurUtilization = 0.0
+    var sulfurUtilization =
+        QRTLConstants.sulfurUtilization
 
     var averageOverpotentialV = 0.0
 
@@ -592,23 +520,16 @@ struct QRTLDesignResult {
     var degradationFraction = 0.0
 
     // ========================================================
-    // Constraint Results
+    // Constraints
     // ========================================================
 
     var energyPass = false
-
     var powerPass = false
-
     var massPass = false
-
     var specificEnergyPass = false
-
     var efficiencyPass = false
-
     var thermalPass = false
-
     var timePass = false
-
     var mechanicalPass = false
 
     var overallPass = false

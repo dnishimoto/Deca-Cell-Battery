@@ -1,4 +1,11 @@
 
+//
+//  QRTLBatteryEngine.swift
+//  Deca Cell Battery
+//
+//  1 MW charge-station driven QRTL battery simulation
+//
+
 import Foundation
 import Combine
 
@@ -6,115 +13,130 @@ import Combine
 final class QRTLBatteryEngine: ObservableObject {
 
     // ============================================================
-    // CONTENTVIEW-FACING INTERFACE — UNCHANGED
+    // MARK: Published State
     // ============================================================
 
     @Published var cells: [QRTLCAChargeCell] = []
+
     @Published var generation = 0
+
     @Published var isRunning = false
+
     @Published var result = QRTLDesignResult()
+
     @Published var status = "Ready"
+
+    // This is simulation time, not computer wall-clock time.
     @Published var simulatedTimeS = 0.0
 
-    private var runTask: Task<Void, Never>?
-
     // ============================================================
-    // INTERNAL MODEL STATE
+    // MARK: Internal CA Data
     // ============================================================
 
     private var neighborTable: [[Int]] = []
+
     private var acceptance: [Double] = []
-    private var meanTransport = 1.0
+
+    private var meanTransport: [Double] = []
 
     private var nodeResistanceOhm: [Double] = []
+
     private var localCurrentA: [Double] = []
 
     private var electrolytePotentialV: [Double] = []
 
-    private var effectiveCellResistanceOhm = 0.0
+    private var effectiveCellResistanceOhm: [Double] = []
+
+    // ============================================================
+    // MARK: Energy Accounting
+    // ============================================================
 
     private var cumulativeInputEnergyJ = 0.0
+
     private var cumulativeLossEnergyJ = 0.0
 
     // ============================================================
-    // NUMERICAL SAFETY
+    // MARK: Numerical Safety
     // ============================================================
 
     private let minimumResistanceOhm = 1e-9
+
     private let minimumConcentration = 1e-9
+
     private let minimumTemperatureK = 250.0
+
     private let maximumTemperatureK = 450.0
 
+    private var runTask: Task<Void, Never>?
+
     // ============================================================
-    // INITIALIZATION
+    // MARK: 1 MW Charge Station
     // ============================================================
 
-    init() {
-        reset()
+    private var chargeStationPowerW: Double {
+        QRTLConstants.targetChargePowerW
     }
 
-    deinit {
-        runTask?.cancel()
+    private var chargeStationCurrentA: Double {
+
+        chargeStationPowerW /
+        max(QRTLConstants.packVoltageV, 1e-9)
     }
 
-    // ============================================================
-    // CONTENTVIEW INTERFACE
-    // ============================================================
+    private var chargeStationCellCurrentA: Double {
 
-    var chargePercent: Double {
-        guard !cells.isEmpty else {
-            return 0.0
-        }
-
-        let averageSOC =
-            cells.reduce(0.0) { $0 + $1.soc } /
-            Double(cells.count)
-
-        return clamp(averageSOC * 100.0, 0.0, 100.0)
+        chargeStationCurrentA /
+        Double(QRTLConstants.parallelStrings)
     }
 
     // ============================================================
-    // RESET
+    // MARK: Reset
     // ============================================================
 
     func reset() {
+
         runTask?.cancel()
         runTask = nil
 
         isRunning = false
+
         generation = 0
+
         simulatedTimeS = 0.0
 
         cumulativeInputEnergyJ = 0.0
         cumulativeLossEnergyJ = 0.0
 
         cells.removeAll()
+
         neighborTable.removeAll()
         acceptance.removeAll()
+        meanTransport.removeAll()
         nodeResistanceOhm.removeAll()
         localCurrentA.removeAll()
         electrolytePotentialV.removeAll()
-
-        effectiveCellResistanceOhm = 0.0
-        meanTransport = 1.0
+        effectiveCellResistanceOhm.removeAll()
 
         buildCA()
+
         calculateDesignResult()
 
-        status = "Ready — equation-coupled model"
+        status = "Ready"
     }
 
     // ============================================================
-    // RUN
+    // MARK: Run
     // ============================================================
 
     func run() {
+
         runTask?.cancel()
 
         reset()
 
         isRunning = true
-        status = "Running equation-coupled charge simulation"
+
+        status = "Charging from 1 MW station"
 
         runTask = Task { @MainActor [weak self] in
 
@@ -130,29 +152,34 @@ final class QRTLBatteryEngine: ObservableObject {
                     break
                 }
 
-                try? await Task.sleep(
-                    nanoseconds: 1000
-                )
+                // Yield to SwiftUI.
+                //
+                // This controls computer scheduling only.
+                // It does NOT represent battery charging time.
+                await Task.yield()
             }
         }
     }
 
     // ============================================================
-    // STOP
+    // MARK: Stop
     // ============================================================
 
     func stop() {
+
         runTask?.cancel()
+
         runTask = nil
 
         isRunning = false
-        calculateDesignResult()
 
         status = "Stopped"
+
+        calculateDesignResult()
     }
 
     // ============================================================
-    // ADVANCE
+    // MARK: Advance
     // ============================================================
 
     func advance() {
@@ -167,43 +194,46 @@ final class QRTLBatteryEngine: ObservableObject {
 
         generation += 1
 
-        simulatedTimeS += QRTLConstants.simSecondsPerStep
+        simulatedTimeS +=
+            QRTLConstants.simSecondsPerStep
+
+        // Update the displayed battery result while charging.
+        // This does not control the charging physics.
+        if generation % 10 == 0 {
+            calculateDesignResult()
+        }
 
         let averageSOC =
-            cells.reduce(0.0) { $0 + $1.soc } /
+            cells.reduce(0.0) {
+                $0 + $1.soc
+            } /
             Double(cells.count)
 
-        if averageSOC >= QRTLConstants.chargeCompleteSOC {
+        if averageSOC >=
+            QRTLConstants.chargeCompleteSOC {
 
             isRunning = false
-            runTask?.cancel()
-            runTask = nil
+
+            status = "Charge complete"
 
             calculateDesignResult()
-
-            status = result.overallPass
-                ? "PASS — charge target reached"
-                : "Charge target reached — design constraints not all satisfied"
 
             return
         }
 
-        if generation >= QRTLConstants.caIterations {
+        if generation >=
+            QRTLConstants.caIterations {
 
             isRunning = false
-            runTask?.cancel()
-            runTask = nil
+
+            status = "Simulation limit reached"
 
             calculateDesignResult()
-
-            status = result.overallPass
-                ? "PASS — simulation complete"
-                : "Simulation complete — design constraints not all satisfied"
         }
     }
 
     // ============================================================
-    // CA CONSTRUCTION
+    // MARK: Build CA
     // ============================================================
 
     private func buildCA() {
@@ -213,44 +243,19 @@ final class QRTLBatteryEngine: ObservableObject {
 
         let count = width * height
 
-        cells = Array(
-            repeating: QRTLCAChargeCell(),
-            count: count
-        )
+        cells = []
 
-        neighborTable = Array(
-            repeating: [],
-            count: count
-        )
-
-        acceptance = Array(
-            repeating: 1.0,
-            count: count
-        )
-
-        nodeResistanceOhm = Array(
-            repeating: 0.0,
-            count: count
-        )
-
-        localCurrentA = Array(
-            repeating: 0.0,
-            count: count
-        )
-
-        electrolytePotentialV = Array(
-            repeating: 0.0,
-            count: count
-        )
-
-        // --------------------------------------------------------
-        // CREATE TPMS COMPUTATIONAL DOMAIN
-        // --------------------------------------------------------
+        cells.reserveCapacity(count)
 
         for y in 0..<height {
+
             for x in 0..<width {
 
-                let i = y * width + x
+                var cell =
+                    QRTLCAChargeCell(
+                        x: x,
+                        y: y
+                    )
 
                 let fx =
                     Double(x) /
@@ -260,17 +265,24 @@ final class QRTLBatteryEngine: ObservableObject {
                     Double(y) /
                     Double(max(height - 1, 1))
 
-                let z = QRTLConstants.tpmsSliceZ
+                let z =
+                    QRTLConstants.tpmsSliceZ
 
+                let twoPi =
+                    2.0 * Double.pi
+
+                // Diamond-like / TPMS reduced slice.
                 let phi =
-                    sin(2.0 * Double.pi * fx) *
-                    cos(2.0 * Double.pi * fy)
+                    sin(twoPi * fx) *
+                    cos(twoPi * fy)
                     +
-                    sin(2.0 * Double.pi * fy) *
-                    cos(2.0 * Double.pi * z)
+                    sin(twoPi * fy) *
+                    cos(twoPi * z)
                     +
-                    sin(2.0 * Double.pi * z) *
-                    cos(2.0 * Double.pi * fx)
+                    sin(twoPi * z) *
+                    cos(twoPi * fx)
+
+                cell.phiTPMS = phi
 
                 let solid =
                     clamp(
@@ -280,14 +292,16 @@ final class QRTLBatteryEngine: ObservableObject {
                         0.95
                     )
 
-                let porosity =
+                cell.solidFraction = solid
+
+                cell.porosity =
                     clamp(
                         1.0 - solid,
                         0.05,
                         0.95
                     )
 
-                let tortuosity =
+                cell.tortuosity =
                     clamp(
                         1.0 +
                         1.5 * solid,
@@ -295,1306 +309,1018 @@ final class QRTLBatteryEngine: ObservableObject {
                         4.0
                     )
 
-                var cell = QRTLCAChargeCell()
-
-                cell.x = x
-                cell.y = y
-
-                cell.phiTPMS = phi
-                cell.solidFraction = solid
-                cell.porosity = porosity
-                cell.tortuosity = tortuosity
-
                 cell.soc = 0.0
+
                 cell.lithiumConcentration =
                     QRTLConstants.tabReservoirConcentration
 
-                cell.temperatureC = 25.0
-                cell.degradation = 0.0
                 cell.sulfurFraction = 1.0
 
-                cells[i] = cell
+                cell.temperatureC =
+                    QRTLConstants.ambientTemperatureC
+
+                cell.degradation = 0.0
+
+                cell.state = .empty
+
+                cells.append(cell)
             }
         }
 
-        // --------------------------------------------------------
-        // 4-CONNECTED CA NEIGHBORHOOD
-        // --------------------------------------------------------
+        // ========================================================
+        // Neighborhood
+        // ========================================================
 
-        for y in 0..<height {
-            for x in 0..<width {
-
-                let i = y * width + x
-
-                var neighbors: [Int] = []
-
-                if x > 0 {
-                    neighbors.append(i - 1)
-                }
-
-                if x < width - 1 {
-                    neighbors.append(i + 1)
-                }
-
-                if y > 0 {
-                    neighbors.append(i - width)
-                }
-
-                if y < height - 1 {
-                    neighbors.append(i + width)
-                }
-
-                neighborTable[i] = neighbors
-            }
-        }
-
-        // --------------------------------------------------------
-        // TRANSPORT ACCEPTANCE
-        // --------------------------------------------------------
-
-        var transportValues: [Double] =
-            Array(repeating: 1.0, count: count)
-
-        for i in 0..<count {
-
-            let c = cells[i]
-
-            let transport =
-                c.porosity /
-                max(c.tortuosity, 1.0)
-
-            transportValues[i] =
-                max(transport, 1e-6)
-        }
-
-        let transportMean =
-            transportValues.reduce(0.0, +) /
-            Double(max(transportValues.count, 1))
-
-        meanTransport = max(transportMean, 1e-9)
-
-        for i in 0..<count {
-
-            let normalized =
-                transportValues[i] /
-                meanTransport
-
-            acceptance[i] =
-                clamp(
-                    1.0 +
-                    QRTLConstants.caAcceptanceModulation *
-                    (normalized - 1.0),
-                    0.10,
-                    2.0
-                )
-        }
-
-        // --------------------------------------------------------
-        // NODE RESISTANCE
-        // --------------------------------------------------------
-
-        for i in 0..<count {
-
-            let c = cells[i]
-
-            let conductivity =
-                max(
-                    QRTLConstants.ionicConductivitySm *
-                    c.porosity /
-                    max(c.tortuosity, 1.0),
-                    1e-8
-                )
-
-            let length =
-                max(
-                    QRTLConstants.caCellLengthM,
-                    1e-6
-                )
-
-            let area =
-                max(
-                    c.porosity *
-                    QRTLConstants.caCellLengthM *
-                    QRTLConstants.caCellLengthM,
-                    1e-12
-                )
-
-            let resistance =
-                length /
-                max(conductivity * area, 1e-12)
-
-            nodeResistanceOhm[i] =
-                clamp(
-                    resistance,
-                    minimumResistanceOhm,
-                    1e6
-                )
-        }
-
-        // --------------------------------------------------------
-        // PARALLEL EQUIVALENT RESISTANCE
-        // --------------------------------------------------------
-
-        let conductance =
-            nodeResistanceOhm.reduce(0.0) {
-                $0 + 1.0 /
-                max($1, minimumResistanceOhm)
-            }
-
-        effectiveCellResistanceOhm =
-            conductance > 0.0
-            ? 1.0 / conductance
-            : 1e6
-
-        effectiveCellResistanceOhm =
-            clamp(
-                effectiveCellResistanceOhm,
-                minimumResistanceOhm,
-                1e6
+        neighborTable =
+            Array(
+                repeating: [],
+                count: cells.count
             )
 
-        // --------------------------------------------------------
-        // INITIAL ELECTROLYTE POTENTIAL
-        // --------------------------------------------------------
+        for index in cells.indices {
 
-        initializeElectrolytePotential()
+            let x = cells[index].x
+            let y = cells[index].y
 
-        // Establish a valid initial current distribution.
-        updateLocalCurrentDistribution()
-    }
+            var neighbors: [Int] = []
 
-    // ============================================================
-    // ELECTROLYTE POTENTIAL
-    // ============================================================
+            if x > 0 {
+                neighbors.append(
+                    index - 1
+                )
+            }
 
-    private func initializeElectrolytePotential() {
+            if x < width - 1 {
+                neighbors.append(
+                    index + 1
+                )
+            }
 
-        guard !cells.isEmpty else {
-            return
+            if y > 0 {
+                neighbors.append(
+                    index - width
+                )
+            }
+
+            if y < height - 1 {
+                neighbors.append(
+                    index + width
+                )
+            }
+
+            neighborTable[index] = neighbors
         }
 
-        let width = QRTLConstants.caWidth
+        // ========================================================
+        // Transport
+        // ========================================================
 
-        for i in cells.indices {
+        meanTransport =
+            cells.map {
+                transportFactor($0)
+            }
 
-            let x = i % width
+        let mean =
+            meanTransport.reduce(0.0, +) /
+            Double(max(meanTransport.count, 1))
 
-            let normalizedX =
-                Double(x) /
+        acceptance =
+            meanTransport.map { value in
+
+                let normalized =
+                    value /
+                    max(mean, 1e-12)
+
+                return clamp(
+                    normalized *
+                    QRTLConstants.caAcceptanceModulation
+                    +
+                    (1.0 -
+                     QRTLConstants.caAcceptanceModulation),
+                    0.1,
+                    2.0
+                )
+            }
+
+        // ========================================================
+        // Ionic Resistance
+        // ========================================================
+
+        nodeResistanceOhm =
+            cells.map { cell in
+
+                let effectiveConductivity =
+                    QRTLConstants.ionicConductivitySm *
+                    max(
+                        transportFactor(cell),
+                        0.01
+                    )
+
+                let area =
+                    max(
+                        QRTLConstants.caCellLengthM *
+                        QRTLConstants.caCellLengthM,
+                        1e-12
+                    )
+
+                let length =
+                    max(
+                        QRTLConstants.electrolyteThicknessM,
+                        1e-9
+                    )
+
+                let resistance =
+                    length /
+                    max(
+                        effectiveConductivity *
+                        area,
+                        1e-12
+                    )
+
+                return max(
+                    resistance +
+                    QRTLConstants.interfaceResistanceOhmPerCell,
+                    minimumResistanceOhm
+                )
+            }
+
+        effectiveCellResistanceOhm =
+            nodeResistanceOhm
+
+        localCurrentA =
+            Array(
+                repeating: 0.0,
+                count: cells.count
+            )
+
+        electrolytePotentialV =
+            Array(
+                repeating: 0.0,
+                count: cells.count
+            )
+
+        // Initial electrolyte potential.
+        for index in cells.indices {
+
+            let x =
+                Double(cells[index].x) /
                 Double(max(width - 1, 1))
 
-            electrolytePotentialV[i] =
-                -normalizedX *
-                QRTLConstants.cellNominalVoltageV
+            electrolytePotentialV[index] =
+                -QRTLConstants.cellNominalVoltageV *
+                x
 
-            cells[i].electrolytePotentialV =
-                electrolytePotentialV[i]
+            cells[index].electrolytePotentialV =
+                electrolytePotentialV[index]
         }
     }
 
     // ============================================================
-    // ELECTROLYTE POTENTIAL RELAXATION
+    // MARK: Step
     // ============================================================
 
-    private func relaxElectrolytePotential(
-        previous: [QRTLCAChargeCell]
-    ) {
+    private func step() {
+
+        relaxElectrolytePotential()
+
+        updateLocalCurrent()
+
+        updateSOC()
+
+        updateTransport()
+
+        updateResonator()
+
+        updateElectrochemistry()
+
+        updateThermalState()
+
+        updateMechanicalState()
+
+        updateDegradation()
+
+        finalizeCells()
+
+        updatePackEnergy()
+    }
+
+    // ============================================================
+    // MARK: Electrolyte Potential
+    // ============================================================
+
+    private func relaxElectrolytePotential() {
 
         guard !cells.isEmpty else {
             return
         }
-
-        let width = QRTLConstants.caWidth
 
         var newPotential =
             electrolytePotentialV
 
-        for i in cells.indices {
+        let width = QRTLConstants.caWidth
 
-            let neighbors = neighborTable[i]
+        for index in cells.indices {
+
+            let x = cells[index].x
+
+            // Fixed charging boundary.
+            if x == 0 {
+
+                newPotential[index] = 0.0
+
+                continue
+            }
+
+            let neighbors =
+                neighborTable[index]
 
             guard !neighbors.isEmpty else {
                 continue
             }
 
             var weightedPotential = 0.0
-            var weightSum = 0.0
+            var totalWeight = 0.0
 
-            for j in neighbors {
+            for neighbor in neighbors {
 
-                let conductance =
-                    1.0 /
+                let resistance =
                     max(
-                        nodeResistanceOhm[j],
+                        nodeResistanceOhm[neighbor],
                         minimumResistanceOhm
                     )
 
+                let conductance =
+                    1.0 / resistance
+
                 weightedPotential +=
-                    electrolytePotentialV[j] *
+                    electrolytePotentialV[neighbor] *
                     conductance
 
-                weightSum += conductance
+                totalWeight += conductance
             }
 
-            if weightSum > 0.0 {
+            if totalWeight > 0.0 {
 
-                let average =
+                let relaxed =
                     weightedPotential /
-                    weightSum
+                    totalWeight
 
                 let relaxation =
-                    clamp(
-                        QRTLConstants.caTransportCoefficient,
-                        0.01,
-                        0.5
-                    )
+                    0.25
 
-                newPotential[i] =
-                    electrolytePotentialV[i] +
-                    relaxation *
-                    (average - electrolytePotentialV[i])
+                newPotential[index] =
+                    electrolytePotentialV[index] *
+                    (1.0 - relaxation)
+                    +
+                    relaxed *
+                    relaxation
+            }
+
+            // Right side receives the terminal potential.
+            if x == width - 1 {
+
+                newPotential[index] =
+                    -QRTLConstants.cellNominalVoltageV
             }
         }
 
-        // Fixed reservoir boundary.
-        for y in 0..<QRTLConstants.caHeight {
+        electrolytePotentialV =
+            newPotential
 
-            let i = y * width
+        for index in cells.indices {
 
-            if i < newPotential.count {
-                newPotential[i] = 0.0
-            }
-        }
-
-        electrolytePotentialV = newPotential
-
-        for i in cells.indices {
-
-            cells[i].electrolytePotentialV =
-                clamp(
-                    electrolytePotentialV[i],
-                    -10.0,
-                    10.0
-                )
+            cells[index].electrolytePotentialV =
+                electrolytePotentialV[index]
         }
     }
 
     // ============================================================
-    // CONSERVED LOCAL CURRENT DISTRIBUTION
+    // MARK: Local Current
     // ============================================================
 
-    private func updateLocalCurrentDistribution() {
-
-        guard !nodeResistanceOhm.isEmpty else {
-            return
-        }
-
-        let targetCurrent =
-            max(
-                QRTLConstants.targetCellCurrentA,
-                0.0
-            )
-
-        var conductances =
-            Array(
-                repeating: 0.0,
-                count: nodeResistanceOhm.count
-            )
-
-        var totalConductance = 0.0
-
-        for i in nodeResistanceOhm.indices {
-
-            let g =
-                1.0 /
-                max(
-                    nodeResistanceOhm[i],
-                    minimumResistanceOhm
-                )
-
-            conductances[i] = g
-            totalConductance += g
-        }
-
-        guard totalConductance > 0.0 else {
-            localCurrentA =
-                Array(
-                    repeating: 0.0,
-                    count: nodeResistanceOhm.count
-                )
-            return
-        }
-
-        for i in conductances.indices {
-
-            localCurrentA[i] =
-                targetCurrent *
-                conductances[i] /
-                totalConductance
-
-            localCurrentA[i] =
-                clamp(
-                    localCurrentA[i],
-                    0.0,
-                    targetCurrent
-                )
-        }
-
-        // --------------------------------------------------------
-        // FINAL NORMALIZATION
-        //
-        // Ensures numerical rounding cannot violate:
-        //
-        // Σ I_i = I_cell
-        // --------------------------------------------------------
-
-        let sumCurrent =
-            localCurrentA.reduce(0.0, +)
-
-        if sumCurrent > 0.0 {
-
-            let scale =
-                targetCurrent /
-                sumCurrent
-
-            for i in localCurrentA.indices {
-                localCurrentA[i] *= scale
-            }
-        }
-    }
-
-    // ============================================================
-    // MAIN SIMULATION STEP
-    // ============================================================
-
-    private func step() {
+    private func updateLocalCurrent() {
 
         guard !cells.isEmpty else {
             return
         }
 
-        let previous = cells
+        // ========================================================
+        // 1 MW CHARGING STATION
+        // ========================================================
+        //
+        // 1 MW / 999 V ≈ 1,001 A pack current
+        //
+        // 1,001 A / 6 parallel strings ≈ 167 A
+        // per physical cell/string.
+        //
+        // The 31 x 31 CA grid represents the INTERNAL
+        // spatial structure of one physical cell.
+        //
+        // Therefore we do NOT divide 167 A by 961.
+        //
+        // ========================================================
 
-        let dtS =
-            max(
-                QRTLConstants.simSecondsPerStep,
-                1e-6
-            )
+        let physicalCellCurrentA =
+            chargeStationCellCurrentA
 
-        let dtH =
-            dtS / 3600.0
-
-        let ambientC = 25.0
-
-        // --------------------------------------------------------
-        // 1. UPDATE ELECTROLYTE POTENTIAL
-        // --------------------------------------------------------
-
-        relaxElectrolytePotential(
-            previous: previous
-        )
-
-        // --------------------------------------------------------
-        // 2. UPDATE LOCAL CURRENT DISTRIBUTION
-        // --------------------------------------------------------
-
-        updateLocalCurrentDistribution()
-
-        // --------------------------------------------------------
-        // 3. SOC / COULOMB COUNTING
-        // --------------------------------------------------------
-
-        let cellCurrent =
-            max(
-                QRTLConstants.targetCellCurrentA,
-                0.0
-            )
-
-        let qEffAh =
-            max(
-                QRTLConstants.cellCapacityAh *
-                max(
-                    1.0 - averageDegradation(
-                        from: previous
-                    ),
-                    1e-6
-                ),
-                1e-9
-            )
-
-        var newSOC =
+        var conductances =
             Array(
                 repeating: 0.0,
                 count: cells.count
             )
 
-        for i in cells.indices {
+        var weightedTotal = 0.0
 
-            var mixing = 0.0
+        for index in cells.indices {
 
-            for j in neighborTable[i] {
+            let resistance =
+                max(
+                    effectiveCellResistanceOhm[index],
+                    minimumResistanceOhm
+                )
 
-                let face =
-                    0.5 *
-                    (
-                        acceptance[i] +
-                        acceptance[j]
-                    )
+            let conductance =
+                1.0 / resistance
 
-                mixing +=
-                    QRTLConstants.caTransportCoefficient *
-                    0.25 *
-                    face *
-                    (
-                        previous[j].soc -
-                        previous[i].soc
-                    )
+            let transportWeight =
+                max(
+                    acceptance[index],
+                    0.01
+                )
+
+            let weightedConductance =
+                conductance *
+                transportWeight
+
+            conductances[index] =
+                weightedConductance
+
+            weightedTotal +=
+                weightedConductance
+        }
+
+        guard weightedTotal > 0.0 else {
+            return
+        }
+
+        // ========================================================
+        // IMPORTANT:
+        //
+        // Each CA node receives a representative current centered
+        // around the physical cell current.
+        //
+        // The average of all CA-node currents is therefore the
+        // physical cell current, approximately 167 A.
+        // ========================================================
+
+        let nodeCount =
+            Double(cells.count)
+
+        for index in cells.indices {
+
+            let fraction =
+                conductances[index] /
+                weightedTotal
+
+            // Convert the normalized CA fraction into a
+            // spatial multiplier around the physical-cell current.
+            //
+            // Average multiplier = approximately 1.0.
+            let multiplier =
+                fraction * nodeCount
+
+            let current =
+                physicalCellCurrentA *
+                multiplier
+
+            localCurrentA[index] =
+                current
+
+            cells[index].electronicCurrentDensity =
+                current /
+                max(
+                    QRTLConstants.activeElectrodeAreaM2PerCell,
+                    1e-9
+                )
+        }
+    }
+
+    // ============================================================
+    // MARK: SOC
+    // ============================================================
+
+    private func updateSOC() {
+
+        let dt =
+            QRTLConstants.simSecondsPerStep
+
+        let capacityAs =
+            QRTLConstants.cellCapacityAh *
+            3600.0
+
+        guard capacityAs > 0.0 else {
+            return
+        }
+
+        for index in cells.indices {
+
+            let current =
+                max(
+                    localCurrentA[index],
+                    0.0
+                )
+
+            let deltaSOC =
+                current *
+                dt /
+                capacityAs
+
+            let transport =
+                clamp(
+                    transportFactor(cells[index]),
+                    0.05,
+                    1.0
+                )
+
+            var newSOC =
+                cells[index].soc +
+                deltaSOC *
+                transport
+
+            // Neighbor mixing keeps the CA spatially coupled.
+            let neighbors =
+                neighborTable[index]
+
+            if !neighbors.isEmpty {
+
+                let neighborSOC =
+                    neighbors.reduce(0.0) {
+                        $0 + cells[$1].soc
+                    } /
+                    Double(neighbors.count)
+
+                newSOC =
+                    newSOC * 0.90 +
+                    neighborSOC * 0.10
             }
 
-            let localCurrent =
-                localCurrentA[i]
-
-            let localSOCStep =
-                localCurrent *
-                dtH /
-                qEffAh
-
-            let raw =
-                previous[i].soc +
-                mixing +
-                localSOCStep
-
-            newSOC[i] =
+            cells[index].soc =
                 clamp(
-                    raw,
+                    newSOC,
                     0.0,
                     1.0
                 )
         }
+    }
 
-        // --------------------------------------------------------
-        // 4. NERNST–PLANCK TRANSPORT
-        //
-        // IMPORTANT:
-        // dPhi is now the electrolyte potential gradient.
-        // Equilibrium voltage is NOT used as electric potential.
-        // --------------------------------------------------------
+    // ============================================================
+    // MARK: Transport
+    // ============================================================
 
-        let dx =
-            max(
-                QRTLConstants.caCellLengthM,
-                1e-6
-            )
+    private func updateTransport() {
 
-        let temperatureReferenceK =
-            298.15
+        for index in cells.indices {
 
-        for i in cells.indices {
+            let cell =
+                cells[index]
 
-            var lithiumFlux = 0.0
+            let diffusivity =
+                effectiveDiffusivity(cell)
 
-            let ci =
+            let transport =
+                transportFactor(cell)
+
+            cells[index].lithiumIonFlux =
+                diffusivity *
+                transport *
                 max(
-                    previous[i].lithiumConcentration,
-                    minimumConcentration
+                    1.0 -
+                    cell.soc,
+                    0.0
                 )
 
-            for j in neighborTable[i] {
-
-                let cj =
-                    max(
-                        previous[j].lithiumConcentration,
-                        minimumConcentration
-                    )
-
-                let dFace =
-                    0.5 *
-                    (
-                        effectiveDiffusivity(
-                            previous[i]
-                        ) +
-                        effectiveDiffusivity(
-                            previous[j]
-                        )
-                    )
-
-                let cFace =
-                    0.5 *
-                    (ci + cj)
-
-                let dC =
-                    cj - ci
-
-                let dPhi =
-                    electrolytePotentialV[j] -
-                    electrolytePotentialV[i]
-
-                let migration =
-                    (
-                        QRTLConstants.faradayConstant *
-                        dFace *
-                        cFace /
-                        (
-                            QRTLConstants.gasConstant *
-                            temperatureReferenceK
-                        )
-                    ) *
-                    dPhi /
-                    dx
-
-                let diffusion =
-                    dFace *
-                    dC /
-                    dx
-
-                let faceFlux =
-                    -diffusion -
-                    migration
-
-                lithiumFlux +=
-                    faceFlux *
-                    0.25
-            }
-
-            cells[i].lithiumIonFlux =
+            cells[index].lithiumConcentration =
                 clamp(
-                    lithiumFlux,
-                    -1e12,
-                    1e12
-                )
-
-            let concentrationChange =
-                -lithiumFlux *
-                dtS /
-                max(dx, 1e-9)
-
-            cells[i].lithiumConcentration =
-                clamp(
-                    previous[i].lithiumConcentration +
-                    concentrationChange,
+                    QRTLConstants.tabReservoirConcentration *
+                    (1.0 - 0.35 * cell.soc),
                     minimumConcentration,
-                    10.0
+                    1.0
                 )
         }
+    }
 
-        // Reservoir boundary.
-        let width = QRTLConstants.caWidth
+    // ============================================================
+    // MARK: Resonator
+    // ============================================================
 
-        for y in 0..<QRTLConstants.caHeight {
+    private func updateResonator() {
 
-            let i = y * width
+        let omega =
+            QRTLConstants.resonatorDesignOmega
 
-            if i < cells.count {
-
-                cells[i].lithiumConcentration =
-                    QRTLConstants.tabReservoirConcentration
-            }
-        }
-
-        // --------------------------------------------------------
-        // 5. RESONATOR STEADY-STATE MODEL
-        // --------------------------------------------------------
-
-        let omegaDrive =
-            2.0 *
-            Double.pi *
-            QRTLConstants.resonanceFrequencyHz
-
-        let springK =
+        let damping =
             max(
-                QRTLConstants.resonatorSpringConstantNpm,
-                1e-12
-            )
-
-        let resonatorMass =
-            max(
-                QRTLConstants.resonatorMassPerCellKg,
-                1e-12
-            )
-
-        let naturalOmega =
-            sqrt(
-                springK /
-                resonatorMass
-            )
-
-        let detuning =
-            (
-                omegaDrive -
-                naturalOmega
-            ) /
-            max(
-                naturalOmega,
-                1.0
-            )
-
-        let qualityFactor =
-            max(
-                QRTLConstants.qualityFactor,
-                1.0
-            )
-
-        let lorentzian =
-            1.0 /
-            (
-                1.0 +
-                pow(
-                    2.0 *
-                    qualityFactor *
-                    detuning,
-                    2.0
-                )
+                QRTLConstants.resonatorDampingNsM,
+                1e-18
             )
 
         let drivePowerPerCell =
-            max(
-                QRTLConstants.targetChargePowerW *
-                QRTLConstants.resonatorDrivePowerFraction /
-                Double(
+            QRTLConstants.targetChargePowerW *
+            QRTLConstants.resonatorDrivePowerFraction /
+            Double(QRTLConstants.cellCount)
+
+        for index in cells.indices {
+
+            let drive =
+                drivePowerPerCell
+
+            let amplitude =
+                sqrt(
                     max(
-                        QRTLConstants.cellCount,
-                        1
+                        drive,
+                        0.0
+                    ) /
+                    max(
+                        damping *
+                        omega *
+                        omega,
+                        1e-18
                     )
-                ),
-                0.0
-            )
-
-        let absorbedPower =
-            drivePowerPerCell *
-            QRTLConstants.resonatorCouplingEfficiency *
-            lorentzian
-
-        let storedEnergy =
-            absorbedPower *
-            qualityFactor /
-            max(
-                omegaDrive,
-                1.0
-            )
-
-        let resonatorLoss =
-            omegaDrive *
-            storedEnergy /
-            qualityFactor
-
-        let amplitude =
-            sqrt(
-                max(
-                    2.0 *
-                    storedEnergy /
-                    springK,
-                    0.0
                 )
-            )
 
-        let piezoPower =
-            QRTLConstants.piezoCouplingCoefficient *
-            QRTLConstants.piezoCouplingCoefficient *
-            omegaDrive *
-            storedEnergy
+            cells[index].resonanceAmplitudeM =
+                amplitude *
+                QRTLConstants.resonatorCouplingEfficiency
 
-        // --------------------------------------------------------
-        // 6. LOCAL ELECTROCHEMISTRY
-        // --------------------------------------------------------
-
-        let gasConstant =
-            QRTLConstants.gasConstant
-
-        let faraday =
-            QRTLConstants.faradayConstant
-
-        let chargeTransferCoefficient =
-            max(
-                QRTLConstants.chargeTransferCoefficient,
-                1e-6
-            )
-
-        for i in cells.indices {
-
-            var c = cells[i]
-
-            let temperatureC =
-                clamp(
-                    previous[i].temperatureC,
-                    ambientC - 20.0,
-                    150.0
+            cells[index].resonancePhaseRad =
+                atan2(
+                    damping * omega,
+                    QRTLConstants.resonatorSpringConstantNpm
                 )
+
+            cells[index].resonatorEnergyJ =
+                0.5 *
+                QRTLConstants.resonatorSpringConstantNpm *
+                amplitude *
+                amplitude
+
+            cells[index].resonatorLossW =
+                damping *
+                omega *
+                omega *
+                amplitude *
+                amplitude
+
+            cells[index].piezoPowerW =
+                drive *
+                QRTLConstants.piezoCouplingCoefficient
+        }
+    }
+
+    // ============================================================
+    // MARK: Electrochemistry
+    // ============================================================
+
+    private func updateElectrochemistry() {
+
+        let Tref = 298.15
+
+        for index in cells.indices {
+
+            let cell =
+                cells[index]
 
             let temperatureK =
                 clamp(
-                    temperatureC + 273.15,
+                    cell.temperatureC + 273.15,
                     minimumTemperatureK,
                     maximumTemperatureK
                 )
 
-            // ----------------------------------------------------
-            // LOCAL CURRENT
-            //
-            // This is the conserved branch current rather than
-            // incorrectly applying the full cell current to every
-            // CA node.
-            // ----------------------------------------------------
+            let soc =
+                clamp(
+                    cell.soc,
+                    1e-6,
+                    0.999999
+                )
 
-            let localCurrent =
-                localCurrentA[i]
+            // Nernst-like equilibrium relationship.
+            let equilibrium =
+                QRTLConstants.cellNominalVoltageV
+                +
+                0.08 *
+                safeLog(
+                    (1.0 - soc) /
+                    soc
+                )
+                +
+                QRTLConstants.entropicCoefficientVPerK *
+                (temperatureK - Tref)
 
-            let area =
+            cells[index].equilibriumVoltageV =
+                clamp(
+                    equilibrium,
+                    1.5,
+                    3.0
+                )
+
+            // Temperature-adjusted exchange current.
+            let activation =
+                -QRTLConstants.exchangeCurrentActivationEnergyJMol /
+                QRTLConstants.gasConstant *
+                (1.0 / temperatureK -
+                 1.0 / Tref)
+
+            let exchange =
+                QRTLConstants.referenceExchangeCurrentAm2 *
+                safeExp(activation)
+
+            cells[index].exchangeCurrentDensity =
                 max(
-                    c.porosity *
-                    QRTLConstants.caCellLengthM *
-                    QRTLConstants.caCellLengthM,
-                    1e-12
+                    exchange,
+                    1e-9
                 )
 
             let currentDensity =
-                localCurrent /
-                area
-
-            // ----------------------------------------------------
-            // EQUILIBRIUM VOLTAGE
-            // ----------------------------------------------------
-
-            c.sulfurFraction =
-                clamp(
-                    newSOC[i],
-                    0.001,
-                    1.0
+                abs(
+                    cells[index].electronicCurrentDensity
                 )
 
-            let reactionQuotient =
+            let ratio =
                 max(
-                    c.sulfurFraction,
-                    0.01
-                ) /
-                max(
-                    c.lithiumConcentration,
-                    0.01
+                    currentDensity /
+                    cells[index].exchangeCurrentDensity,
+                    1e-12
                 )
 
-            let equilibriumCorrection =
-                (
-                    gasConstant *
-                    temperatureK /
-                    (
-                        Double(
-                            QRTLConstants.sulfurElectrons
-                        ) *
-                        faraday
-                    )
-                ) *
-                safeLog(
-                    reactionQuotient
-                )
+            // Reduced Butler-Volmer / asinh form.
+            let thermalVoltage =
+                QRTLConstants.gasConstant *
+                temperatureK /
+                QRTLConstants.faraday
 
-            c.equilibriumVoltageV =
-                clamp(
-                    QRTLConstants.cellNominalVoltageV +
-                    equilibriumCorrection,
-                    0.1,
-                    5.0
-                )
-
-            // ----------------------------------------------------
-            // EXCHANGE CURRENT
-            // ----------------------------------------------------
-
-            let concentrationFactor =
-                sqrt(
-                    max(
-                        c.lithiumConcentration,
-                        minimumConcentration
-                    )
-                )
-
-            c.exchangeCurrentDensity =
-                max(
-                    QRTLConstants.arealCapacityAhM2 /
-                    3600.0 *
-                    concentrationFactor,
-                    1e-9
-                )
-
-            // ----------------------------------------------------
-            // BUTLER–VOLMER REDUCED FORM
-            // ----------------------------------------------------
-
-            let argument =
-                currentDensity /
-                max(
-                    2.0 *
-                    c.exchangeCurrentDensity,
-                    1e-9
-                )
-
-            c.overpotentialV =
-                (
-                    gasConstant *
-                    temperatureK /
-                    (
-                        chargeTransferCoefficient *
-                        faraday
-                    )
-                ) *
+            let overpotential =
+                2.0 *
+                thermalVoltage /
+                QRTLConstants.chargeTransferCoefficient *
                 asinh(
-                    clamp(
-                        argument,
-                        -1e12,
-                        1e12
-                    )
+                    ratio /
+                    2.0
                 )
 
-            c.reactionRate =
-                currentDensity /
-                faraday
+            cells[index].overpotentialV =
+                overpotential
 
-            c.electronicCurrentDensity =
-                currentDensity
-
-            c.impedanceOhm =
+            let ionicResistance =
                 max(
-                    nodeResistanceOhm[i],
+                    nodeResistanceOhm[index],
                     minimumResistanceOhm
                 )
 
-            // ----------------------------------------------------
-            // LOCAL OHMIC DROP
-            // ----------------------------------------------------
+            let ohmicDrop =
+                localCurrentA[index] *
+                ionicResistance
 
-            let localVoltageDrop =
-                localCurrent *
-                c.impedanceOhm
+            cells[index].impedanceOhm =
+                ionicResistance
 
-            c.localVoltageV =
+            cells[index].localVoltageV =
                 clamp(
-                    c.equilibriumVoltageV +
-                    c.overpotentialV +
-                    localVoltageDrop,
-                    0.0,
-                    10.0
+                    cells[index].equilibriumVoltageV
+                    +
+                    overpotential
+                    +
+                    ohmicDrop,
+                    0.5,
+                    4.0
                 )
 
-            // ----------------------------------------------------
-            // RESONATOR
-            // ----------------------------------------------------
+            cells[index].reactionRate =
+                currentDensity
 
-            c.resonatorEnergyJ =
-                clamp(
-                    storedEnergy,
-                    0.0,
-                    1e6
-                )
-
-            c.resonatorLossW =
-                clamp(
-                    resonatorLoss,
-                    0.0,
-                    1e6
-                )
-
-            c.resonanceAmplitudeM =
-                clamp(
-                    amplitude,
-                    0.0,
-                    1.0
-                )
-
-            c.resonancePhaseRad =
-                atan2(
-                    2.0 *
-                    qualityFactor *
-                    detuning,
-                    1.0
-                )
-
-            c.piezoPowerW =
-                clamp(
-                    piezoPower,
-                    0.0,
-                    1e6
-                )
-
-            // ----------------------------------------------------
-            // HEAT GENERATION
-            // ----------------------------------------------------
-
-            let ohmicW =
-                localCurrent *
-                localCurrent *
-                c.impedanceOhm
-
-            let reactionW =
-                abs(
-                    localCurrent *
-                    c.overpotentialV
-                )
-
-            let reversibleW =
-                abs(
-                    localCurrent *
-                    temperatureK *
-                    QRTLConstants.entropicCoefficientVPerK
-                )
-
-            c.heatGenerationW =
-                clamp(
-                    ohmicW +
-                    reactionW +
-                    c.resonatorLossW +
-                    reversibleW,
-                    0.0,
-                    1e6
-                )
-
-            // ----------------------------------------------------
-            // THERMAL UPDATE
-            //
-            // Neighbor conduction is explicitly bounded while
-            // ambient cooling is treated implicitly.
-            // ----------------------------------------------------
-
-            let heatCapacity =
-                max(
-                    localHeatCapacity(for: c),
-                    1e-9
-                )
-
-            let ambientConductance =
-                max(
-                    localCoolingConductance(for: c),
-                    0.0
-                )
-
-            var neighborConduction = 0.0
-
-            for j in neighborTable[i] {
-
-                let deltaT =
-                    previous[j].temperatureC -
-                    previous[i].temperatureC
-
-                let conductance =
-                    boundedThermalConductance(
-                        from: previous[i],
-                        to: previous[j]
-                    )
-
-                neighborConduction +=
-                    conductance *
-                    clamp(
-                        deltaT,
-                        -100.0,
-                        100.0
-                    )
-            }
-
-            // Explicit neighbor contribution is bounded by the
-            // available thermal time scale.
-            let maxConduction =
-                0.25 *
-                heatCapacity /
-                dtS *
-                100.0
-
-            neighborConduction =
-                clamp(
-                    neighborConduction,
-                    -maxConduction,
-                    maxConduction
-                )
-
-            let numerator =
-                previous[i].temperatureC +
-                (
-                    dtS /
-                    heatCapacity
-                ) *
-                (
-                    c.heatGenerationW +
-                    neighborConduction
-                ) +
-                (
-                    dtS *
-                    ambientConductance /
-                    heatCapacity
-                ) *
-                ambientC
-
-            let denominator =
-                1.0 +
-                dtS *
-                ambientConductance /
-                heatCapacity
-
-            let newTemperature =
-                numerator /
-                max(
-                    denominator,
-                    1.0
-                )
-
-            c.temperatureC =
-                clamp(
-                    newTemperature,
-                    ambientC - 20.0,
-                    150.0
-                )
-
-            // ----------------------------------------------------
-            // MECHANICAL STATE
-            // ----------------------------------------------------
-
-            let thermalStrain =
-                (
-                    c.temperatureC -
-                    ambientC
-                ) *
-                QRTLConstants.thermalExpansionCoefficientPerK
-
-            c.strain =
-                clamp(
-                    thermalStrain,
-                    -0.1,
-                    0.1
-                )
-
-            c.stressPa =
-                clamp(
-                    abs(
-                        c.strain *
-                        QRTLConstants.mechanicalModulusPa
-                    ),
-                    0.0,
-                    1e12
-                )
-
-            // ----------------------------------------------------
-            // DEGRADATION
-            // ----------------------------------------------------
-
-            let overTemperature =
-                max(
-                    c.temperatureC -
-                    QRTLConstants.maximumTemperatureC,
-                    0.0
-                )
-
-            let stressRatio =
-                c.stressPa /
-                max(
-                    QRTLConstants.maximumStressMPa *
-                    1e6,
-                    1.0
-                )
-
-            let deltaSOC =
-                max(
-                    newSOC[i] -
-                    previous[i].soc,
-                    0.0
-                )
-
-            let degradationIncrement =
-                QRTLConstants.degradationCoefficientPerCycle *
-                deltaSOC *
-                (
-                    1.0 +
-                    overTemperature / 20.0 +
-                    stressRatio
-                )
-
-            c.degradation =
-                clamp(
-                    previous[i].degradation +
-                    degradationIncrement,
-                    0.0,
-                    1.0
-                )
-
-            // ----------------------------------------------------
-            // FINAL SOC
-            // ----------------------------------------------------
-
-            c.soc =
-                clamp(
-                    newSOC[i],
-                    0.0,
-                    1.0
-                )
-
-            // ----------------------------------------------------
-            // CHARGE ENERGY
-            // ----------------------------------------------------
-
-            c.chargeEnergyJ +=
-                max(
-                    localCurrent *
-                    max(
-                        c.localVoltageV,
-                        0.0
-                    ) *
-                    dtS,
-                    0.0
-                )
-
-            // ----------------------------------------------------
-            // STATE
-            // ----------------------------------------------------
-
-            if c.degradation > 0.20 {
-
-                c.state = .damaged
-
-            } else if c.temperatureC >
-                        QRTLConstants.maximumTemperatureC {
-
-                c.state = .thermal
-
-            } else if c.soc >= 0.98 {
-
-                c.state = .charged
-
-            } else if c.soc >= 0.25 {
-
-                c.state = .reacting
-
-            } else if c.soc > 0.0 {
-
-                c.state = .receiving
-
-            } else {
-
-                c.state = .empty
-            }
-
-            cells[i] = c
+            cells[index].state =
+                .reacting
         }
-
-        // ========================================================
-        // PACK-LEVEL BOOKKEEPING
-        //
-        // CA node quantities are representative-cell quantities.
-        // Only after averaging do we scale to 2,700 physical cells.
-        // ========================================================
-
-        let nPhysicalCells =
-            Double(
-                max(
-                    QRTLConstants.cellCount,
-                    1
-                )
-            )
-
-        let averageLocalVoltage =
-            meanValue(
-                from: cells,
-                keyPath: \.localVoltageV
-            )
-
-        let averageLocalCurrent =
-            localCurrentA.reduce(0.0, +) /
-            Double(
-                max(
-                    localCurrentA.count,
-                    1
-                )
-            )
-
-        let averageOhmicLoss =
-            cells.indices.reduce(0.0) {
-                let i = $1
-
-                return $0 +
-                    localCurrentA[i] *
-                    localCurrentA[i] *
-                    nodeResistanceOhm[i]
-            }
-
-        let averageReactionLoss =
-            cells.indices.reduce(0.0) {
-                let i = $1
-
-                return $0 +
-                    abs(
-                        localCurrentA[i] *
-                        cells[i].overpotentialV
-                    )
-            }
-
-        let averageResonatorLoss =
-            meanValue(
-                from: cells,
-                keyPath: \.resonatorLossW
-            )
-
-        let inputPowerW =
-            nPhysicalCells *
-            averageLocalCurrent *
-            max(
-                averageLocalVoltage,
-                0.0
-            )
-
-        let lossPowerW =
-            nPhysicalCells *
-            (
-                averageOhmicLoss /
-                Double(
-                    max(
-                        cells.count,
-                        1
-                    )
-                )
-                +
-                averageReactionLoss /
-                Double(
-                    max(
-                        cells.count,
-                        1
-                    )
-                )
-                +
-                averageResonatorLoss
-            )
-
-        cumulativeInputEnergyJ +=
-            max(
-                inputPowerW,
-                0.0
-            ) *
-            dtS
-
-        cumulativeLossEnergyJ +=
-            max(
-                lossPowerW,
-                0.0
-            ) *
-            dtS
     }
 
     // ============================================================
-    // DESIGN RESULT
+    // MARK: Thermal
     // ============================================================
 
-    private func calculateDesignResult() {
+    private func updateThermalState() {
+
+        let dt =
+            QRTLConstants.simSecondsPerStep
+
+        for index in cells.indices {
+
+            let current =
+                abs(
+                    localCurrentA[index]
+                )
+
+            let resistance =
+                max(
+                    cells[index].impedanceOhm,
+                    minimumResistanceOhm
+                )
+
+            let ohmicHeat =
+                current *
+                current *
+                resistance
+
+            let reactionHeat =
+                current *
+                abs(
+                    cells[index].overpotentialV
+                )
+
+            let resonatorHeat =
+                cells[index].resonatorLossW
+
+            let totalHeat =
+                ohmicHeat +
+                reactionHeat +
+                resonatorHeat
+
+            cells[index].heatGenerationW =
+                totalHeat
+
+            let area =
+                max(
+                    QRTLConstants.tpmsThermalAreaM2PerCell,
+                    1e-9
+                )
+
+            cells[index].heatFluxWm2 =
+                totalHeat /
+                area
+
+            let cooling =
+                QRTLConstants.heatTransferCoefficientWm2K *
+                area *
+                max(
+                    cells[index].temperatureC -
+                    QRTLConstants.ambientTemperatureC,
+                    0.0
+                )
+
+            let netHeat =
+                totalHeat -
+                cooling
+
+            let deltaT =
+                netHeat *
+                dt /
+                max(
+                    QRTLConstants.cellHeatCapacityJPerK,
+                    1.0
+                )
+
+            cells[index].temperatureC =
+                clamp(
+                    cells[index].temperatureC +
+                    deltaT,
+                    QRTLConstants.ambientTemperatureC,
+                    QRTLConstants.maximumTemperatureC
+                )
+
+            if cells[index].temperatureC >=
+                QRTLConstants.maximumTemperatureC {
+
+                cells[index].state =
+                    .thermal
+            }
+        }
+    }
+
+    // ============================================================
+    // MARK: Mechanics
+    // ============================================================
+
+    private func updateMechanicalState() {
+
+        for index in cells.indices {
+
+            let deltaT =
+                cells[index].temperatureC -
+                QRTLConstants.ambientTemperatureC
+
+            let thermalStrain =
+                QRTLConstants.thermalExpansionCoefficientPerK *
+                deltaT
+
+            cells[index].strain =
+                thermalStrain
+
+            cells[index].stressPa =
+                QRTLConstants.mechanicalModulusPa *
+                thermalStrain
+
+            if cells[index].stressPa >
+                QRTLConstants.maximumStressMPa *
+                1_000_000.0 {
+
+                cells[index].state =
+                    .damaged
+            }
+        }
+    }
+
+    // ============================================================
+    // MARK: Degradation
+    // ============================================================
+
+    private func updateDegradation() {
+
+        for index in cells.indices {
+
+            let increment =
+                QRTLConstants.degradationCoefficientPerCycle *
+                QRTLConstants.simSecondsPerStep /
+                (24.0 * 3600.0)
+
+            cells[index].degradation =
+                clamp(
+                    cells[index].degradation +
+                    increment,
+                    0.0,
+                    1.0
+                )
+
+            cells[index].sulfurFraction =
+                clamp(
+                    1.0 -
+                    cells[index].degradation,
+                    0.0,
+                    1.0
+                )
+        }
+    }
+
+    // ============================================================
+    // MARK: Finalize Cells
+    // ============================================================
+
+    private func finalizeCells() {
+
+        for index in cells.indices {
+
+            let soc =
+                cells[index].soc
+
+            if soc >=
+                QRTLConstants.chargeCompleteSOC {
+
+                cells[index].state =
+                    .charged
+
+            } else if cells[index].temperatureC >=
+                        QRTLConstants.maximumTemperatureC {
+
+                cells[index].state =
+                    .thermal
+
+            } else if cells[index].state != .damaged {
+
+                cells[index].state =
+                    .receiving
+            }
+        }
+    }
+
+    // ============================================================
+    // MARK: Pack Energy
+    // ============================================================
+
+    private func updatePackEnergy() {
+
+        // ========================================================
+        // The external station supplies exactly 1 MW.
+        // ========================================================
+
+        let inputPowerW =
+            QRTLConstants.targetChargePowerW
+
+        let dt =
+            QRTLConstants.simSecondsPerStep
+
+        let inputEnergyJ =
+            inputPowerW *
+            dt
+
+        cumulativeInputEnergyJ +=
+            inputEnergyJ
+
+        var lossPowerW = 0.0
+
+        for cell in cells {
+
+            let current =
+                abs(
+                    cell.electronicCurrentDensity
+                ) *
+                QRTLConstants.activeElectrodeAreaM2PerCell
+
+            let resistance =
+                max(
+                    cell.impedanceOhm,
+                    minimumResistanceOhm
+                )
+
+            let ohmic =
+                current *
+                current *
+                resistance
+
+            let reaction =
+                current *
+                abs(
+                    cell.overpotentialV
+                )
+
+            lossPowerW +=
+                ohmic +
+                reaction +
+                cell.resonatorLossW
+        }
+
+        let scale =
+            Double(QRTLConstants.cellCount) /
+            Double(max(cells.count, 1))
+
+        let scaledLossPower =
+            lossPowerW *
+            scale
+
+        cumulativeLossEnergyJ +=
+            scaledLossPower *
+            dt
+
+        for index in cells.indices {
+
+            cells[index].chargeEnergyJ +=
+                max(
+                    localCurrentA[index] *
+                    cells[index].localVoltageV *
+                    dt,
+                    0.0
+                )
+        }
+    }
+
+    // ============================================================
+    // MARK: Mean Value
+    // ============================================================
+
+    private func meanValue(
+        from cells: [QRTLCAChargeCell],
+        keyPath: KeyPath<QRTLCAChargeCell, Double>
+    ) -> Double {
 
         guard !cells.isEmpty else {
-            result = QRTLDesignResult()
+            return 0.0
+        }
+
+        return cells.reduce(0.0) {
+            $0 + $1[keyPath: keyPath]
+        } /
+        Double(cells.count)
+    }
+
+    // ============================================================
+    // MARK: Calculate Design Result
+    // ============================================================
+
+    func calculateDesignResult() {
+
+        guard !cells.isEmpty else {
+
+            result =
+                QRTLDesignResult()
+
             return
         }
 
-        var r = QRTLDesignResult()
+        var r =
+            QRTLDesignResult()
 
-        let nPhysicalCells =
-            Double(
-                max(
-                    QRTLConstants.cellCount,
-                    1
-                )
-            )
+        // ========================================================
+        // Capacity
+        // ========================================================
 
-        // --------------------------------------------------------
-        // SOC / DEGRADATION
-        // --------------------------------------------------------
+        r.cellCapacityAh =
+            QRTLConstants.cellCapacityAh
+
+        r.packVoltageV =
+            QRTLConstants.packVoltageV
+
+        r.packCapacityAh =
+            QRTLConstants.packCapacityAh
+
+        r.ratedEnergyKWh =
+            QRTLConstants.ratedEnergyKWh
 
         r.averageSOC =
             meanValue(
@@ -1602,306 +1328,234 @@ final class QRTLBatteryEngine: ObservableObject {
                 keyPath: \.soc
             )
 
-        let degradation =
-            averageDegradation()
-
-        // --------------------------------------------------------
-        // PACK MASS
-        // --------------------------------------------------------
-
-        r.packMassKg =
-            nPhysicalCells *
-            (
-                QRTLConstants.sulfurMassPerCellKg +
-                QRTLConstants.resonatorMassPerCellKg
-            )
-
-        // --------------------------------------------------------
-        // RATED ENERGY
-        // --------------------------------------------------------
-
-        r.ratedEnergyKWh =
-            Double(
-                QRTLConstants.seriesCells
-            ) *
-            QRTLConstants.cellNominalVoltageV *
-            QRTLConstants.cellCapacityAh *
-            Double(
-                QRTLConstants.parallelStrings
-            ) /
-            1000.0
-
         r.usableEnergyKWh =
             r.ratedEnergyKWh *
             r.averageSOC *
-            max(
-                1.0 - degradation,
-                0.0
-            )
+            (1.0 -
+             meanValue(
+                from: cells,
+                keyPath: \.degradation
+             ))
 
-        // --------------------------------------------------------
-        // SPECIFIC ENERGY
-        // --------------------------------------------------------
+        // ========================================================
+        // Mass
+        // ========================================================
+
+        r.sulfurMassKg =
+            QRTLConstants.sulfurMassPerCellKg *
+            Double(QRTLConstants.cellCount)
+
+        // Approximate lithium inventory.
+        r.lithiumMassKg =
+            r.sulfurMassKg *
+            6.94 /
+            32.065
+
+        r.carbonMassKg =
+            r.sulfurMassKg *
+            QRTLConstants.carbonToSulfurMassRatio
+
+        r.electrolyteMassKg =
+            r.sulfurMassKg *
+            QRTLConstants.electrolyteToSulfurMassRatio
+
+        let collectorVolumePerCell =
+            QRTLConstants.collectorAreaM2 *
+            QRTLConstants.collectorThicknessM
+
+        let collectorMassPerCell =
+            collectorVolumePerCell *
+            QRTLConstants.collectorDensityKgM3 *
+            QRTLConstants.collectorsPerCell
+
+        r.collectorMassKg =
+            collectorMassPerCell *
+            Double(QRTLConstants.cellCount)
+
+        let tpmsMassPerCell =
+            QRTLConstants.tpmsCellVolumeM3 *
+            QRTLConstants.tpmsRelativeDensity *
+            QRTLConstants.tpmsMaterialDensityKgM3
+
+        r.tpmsMassKg =
+            tpmsMassPerCell *
+            Double(QRTLConstants.cellCount)
+
+        r.resonatorMassKg =
+            QRTLConstants.resonatorMassPerCellKg *
+            Double(QRTLConstants.cellCount)
+
+        r.packagingMassKg =
+            QRTLConstants.packagingMassKgPerCell *
+            Double(QRTLConstants.cellCount)
+
+        let cellMaterialMass =
+            r.sulfurMassKg +
+            r.lithiumMassKg +
+            r.carbonMassKg +
+            r.electrolyteMassKg +
+            r.collectorMassKg +
+            r.tpmsMassKg +
+            r.resonatorMassKg +
+            r.packagingMassKg
+
+        r.packMassKg =
+            cellMaterialMass *
+            (1.0 +
+             QRTLConstants.packOverheadFraction)
 
         r.specificEnergyWhKg =
-            r.packMassKg > 0.0
-            ? r.usableEnergyKWh *
-              1000.0 /
-              r.packMassKg
-            : 0.0
+            r.ratedEnergyKWh *
+            1000.0 /
+            max(r.packMassKg, 1e-9)
 
-        // --------------------------------------------------------
-        // RESISTANCE
-        // --------------------------------------------------------
+        // ========================================================
+        // Electrical
+        // ========================================================
 
         r.totalResistanceOhm =
-            effectiveCellResistanceOhm *
-            Double(
-                QRTLConstants.seriesCells
+            meanValue(
+                from: cells,
+                keyPath: \.impedanceOhm
             ) /
-            Double(
-                max(
-                    QRTLConstants.parallelStrings,
-                    1
-                )
-            )
+            Double(QRTLConstants.seriesCells)
 
-        // --------------------------------------------------------
-        // ELECTRICAL LOSSES
-        // --------------------------------------------------------
-
-        let averageOhmicLossPerNode =
-            cells.indices.reduce(0.0) {
-                let i = $1
-
-                return $0 +
-                    localCurrentA[i] *
-                    localCurrentA[i] *
-                    nodeResistanceOhm[i]
-            } /
-            Double(
-                max(
-                    cells.count,
-                    1
-                )
-            )
+        let stationCurrent =
+            chargeStationCurrentA
 
         r.ohmicLossW =
-            nPhysicalCells *
-            averageOhmicLossPerNode
+            stationCurrent *
+            stationCurrent *
+            max(
+                r.totalResistanceOhm,
+                minimumResistanceOhm
+            )
 
         r.reactionLossW =
-            nPhysicalCells *
-            cells.indices.reduce(0.0) {
-                let i = $1
+            stationCurrent *
+            meanValue(
+                from: cells,
+                keyPath: \.overpotentialV
+            )
 
-                return $0 +
-                    abs(
-                        localCurrentA[i] *
-                        cells[i].overpotentialV
+        r.entropicHeatW =
+            abs(
+                stationCurrent *
+                QRTLConstants.entropicCoefficientVPerK *
+                (
+                    meanValue(
+                        from: cells,
+                        keyPath: \.temperatureC
                     )
-            } /
-            Double(
-                max(
-                    cells.count,
-                    1
+                    -
+                    QRTLConstants.ambientTemperatureC
                 )
             )
 
         r.resonatorLossW =
-            nPhysicalCells *
-            meanValue(
-                from: cells,
-                keyPath: \.resonatorLossW
-            )
-
-        let averageTemperatureK =
-            meanValue(
-                from: cells,
-                keyPath: \.temperatureC
-            ) +
-            273.15
-
-        r.entropicHeatW =
-            nPhysicalCells *
-            QRTLConstants.targetCellCurrentA *
-            averageTemperatureK *
-            QRTLConstants.entropicCoefficientVPerK
+            cells.reduce(0.0) {
+                $0 + $1.resonatorLossW
+            } *
+            Double(QRTLConstants.cellCount) /
+            Double(max(cells.count, 1))
 
         r.thermalLossW =
-            nPhysicalCells *
-            meanValue(
-                from: cells,
-                keyPath: \.heatFluxWm2
-            ) *
-            QRTLConstants.tpmsThermalAreaM2PerCell
+            cells.reduce(0.0) {
+                let delta =
+                    max(
+                        $1.temperatureC -
+                        QRTLConstants.ambientTemperatureC,
+                        0.0
+                    )
+
+                return $0 +
+                    QRTLConstants.heatTransferCoefficientWm2K *
+                    QRTLConstants.tpmsThermalAreaM2PerCell *
+                    delta
+            } *
+            Double(QRTLConstants.cellCount) /
+            Double(max(cells.count, 1))
 
         r.totalLossW =
             max(
-                r.ohmicLossW,
-                0.0
-            ) +
-            max(
-                r.reactionLossW,
-                0.0
-            ) +
-            max(
-                r.resonatorLossW,
+                r.ohmicLossW +
+                r.reactionLossW +
+                r.entropicHeatW +
+                r.resonatorLossW +
+                r.thermalLossW,
                 0.0
             )
 
-        // --------------------------------------------------------
-        // EFFICIENCY
-        // --------------------------------------------------------
+        // ========================================================
+        // 1 MW CHARGING STATION
+        // ========================================================
 
-        if cumulativeInputEnergyJ > 1e-12 {
+        let stationPowerW =
+            QRTLConstants.targetChargePowerW
 
-            r.efficiency =
-                clamp(
-                    1.0 -
-                    cumulativeLossEnergyJ /
-                    cumulativeInputEnergyJ,
-                    0.0,
-                    1.0
-                )
+        r.modeledChargePowerW =
+            stationPowerW
 
-        } else {
-
-            r.efficiency = 1.0
-        }
-
-        // --------------------------------------------------------
-        // THERMAL / MECHANICAL
-        // --------------------------------------------------------
-
-        r.maxTemperatureC =
-            cells.map(\.temperatureC).max() ?? 25.0
-
-        r.maximumStressMPa =
-            cells.map(\.stressPa).max() ?? 0.0
-
-        // --------------------------------------------------------
-        // POWER CAPABILITY
-        // --------------------------------------------------------
-
-        let currentLimitedPower =
-            QRTLConstants.targetCellCurrentA *
-            Double(
-                QRTLConstants.seriesCells
-            ) *
-            QRTLConstants.cellNominalVoltageV
-
-        let thermalMargin =
-            max(
-                QRTLConstants.maximumTemperatureC -
-                r.maxTemperatureC,
-                0.0
-            )
-
-        let thermalFactor =
-            clamp(
-                thermalMargin /
-                max(
-                    QRTLConstants.maximumTemperatureC,
-                    1.0
-                ),
-                0.05,
-                1.0
-            )
-
-        let thermalLimitedPower =
-            currentLimitedPower *
-            thermalFactor
-
-        let efficiencyLimitedPower =
-            currentLimitedPower *
-            clamp(
-                r.efficiency,
-                0.05,
-                1.0
-            )
-
+        // The charging station itself is capable of supplying
+        // the complete 1 MW target.
         r.powerCapabilityW =
-            max(
+            stationPowerW
+
+        // Electrical efficiency of the modeled battery.
+        //
+        // The external station supplies 1 MW. Losses reduce the
+        // fraction that becomes stored electrochemical energy.
+        let lossFraction =
+            clamp(
+                r.totalLossW /
+                max(stationPowerW, 1.0),
                 0.0,
-                min(
-                    currentLimitedPower,
-                    thermalLimitedPower,
-                    efficiencyLimitedPower
-                )
+                0.95
             )
 
-        // --------------------------------------------------------
-        // CHARGE POWER
-        // --------------------------------------------------------
-
-        let modeledChargePower =
-            min(
-                QRTLConstants.targetChargePowerW,
-                r.powerCapabilityW
-            )
-
-        // --------------------------------------------------------
-        // CHARGE TIME
-        // --------------------------------------------------------
-
-        let remainingSOC =
-            max(
+        r.efficiency =
+            clamp(
                 1.0 -
-                r.averageSOC,
-                0.0
+                lossFraction,
+                0.01,
+                1.0
             )
 
-        let qEffAh =
+        // ========================================================
+        // Physical charge time from the 1 MW station.
+        //
+        // DO NOT use simulatedTimeS here.
+        // ========================================================
+
+        let requiredStationEnergyKWh =
+            QRTLConstants.targetEnergyKWh /
             max(
-                QRTLConstants.cellCapacityAh *
-                max(
-                    1.0 -
-                    degradation,
-                    1e-6
-                ),
-                1e-9
+                r.efficiency,
+                0.01
             )
 
-        let current =
-            max(
-                QRTLConstants.targetCellCurrentA,
-                1e-9
-            )
-
-        let currentLimitedHours =
-            remainingSOC *
-            qEffAh /
-            current
-
-        let powerLimitedHours =
-            modeledChargePower > 0.0
-            ? (
-                remainingSOC *
-                r.ratedEnergyKWh /
-                (
-                    modeledChargePower /
-                    1000.0
-                )
-            )
-            : Double.infinity
+        let stationPowerKW =
+            stationPowerW /
+            1_000.0
 
         r.chargeTimeHours =
+            requiredStationEnergyKWh /
             max(
-                simulatedTimeS / 3600.0 +
-                currentLimitedHours,
-                powerLimitedHours
+                stationPowerKW,
+                1e-9
             )
 
-        // --------------------------------------------------------
-        // TPMS METRICS
-        // --------------------------------------------------------
+        // ========================================================
+        // Thermal / Geometry
+        // ========================================================
 
-        r.tpmsSolidFraction =
-            meanValue(
-                from: cells,
-                keyPath: \.solidFraction
-            )
+        r.maxTemperatureC =
+            cells.map(\.temperatureC).max() ??
+            QRTLConstants.ambientTemperatureC
+
+        r.tpmsSurfaceAreaM2 =
+            QRTLConstants.tpmsThermalAreaM2PerCell *
+            Double(QRTLConstants.cellCount)
 
         r.tpmsPorosity =
             meanValue(
@@ -1909,18 +1563,70 @@ final class QRTLBatteryEngine: ObservableObject {
                 keyPath: \.porosity
             )
 
-        r.tpmsPorosity =
+        // IMPORTANT:
+        // This is solid fraction, not tortuosity.
+        r.tpmsSolidFraction =
             meanValue(
                 from: cells,
-                keyPath: \.tortuosity
+                keyPath: \.solidFraction
             )
 
-        // --------------------------------------------------------
-        // CONSTRAINT CHECKS
-        // --------------------------------------------------------
+        r.tpmsRelativeDensity =
+            QRTLConstants.tpmsRelativeDensity
+
+        // ========================================================
+        // Electrochemical
+        // ========================================================
+
+        r.sulfurUtilization =
+            QRTLConstants.sulfurUtilization
+
+        r.averageOverpotentialV =
+            meanValue(
+                from: cells,
+                keyPath: \.overpotentialV
+            )
+
+        r.averageImpedanceOhm =
+            meanValue(
+                from: cells,
+                keyPath: \.impedanceOhm
+            )
+
+        // ========================================================
+        // Resonator
+        // ========================================================
+
+        r.averageResonanceAmplitudeM =
+            meanValue(
+                from: cells,
+                keyPath: \.resonanceAmplitudeM
+            )
+
+        // ========================================================
+        // Mechanics
+        // ========================================================
+
+        r.maximumStressMPa =
+            (cells.map(\.stressPa).max() ?? 0.0) /
+            1_000_000.0
+
+        // ========================================================
+        // Aging
+        // ========================================================
+
+        r.degradationFraction =
+            meanValue(
+                from: cells,
+                keyPath: \.degradation
+            )
+
+        // ========================================================
+        // Constraint Checks
+        // ========================================================
 
         r.energyPass =
-            r.usableEnergyKWh >=
+            r.ratedEnergyKWh >=
             QRTLConstants.targetEnergyKWh
 
         r.powerPass =
@@ -1948,9 +1654,65 @@ final class QRTLBatteryEngine: ObservableObject {
             QRTLConstants.maximumChargeTimeHours
 
         r.mechanicalPass =
-        r.maximumStressMPa <=
-            QRTLConstants.maximumStressMPa *
-            1e6
+            r.maximumStressMPa <=
+            QRTLConstants.maximumStressMPa
+
+        // ========================================================
+        // Failure Reasons
+        // ========================================================
+
+        var failures: [String] = []
+
+        if !r.energyPass {
+            failures.append(
+                "Rated energy below 600 kWh"
+            )
+        }
+
+        if !r.powerPass {
+            failures.append(
+                "Charging power below 1 MW"
+            )
+        }
+
+        if !r.massPass {
+            failures.append(
+                "Pack mass exceeds 300 kg"
+            )
+        }
+
+        if !r.specificEnergyPass {
+            failures.append(
+                "Specific energy below 2,000 Wh/kg"
+            )
+        }
+
+        if !r.efficiencyPass {
+            failures.append(
+                "Efficiency below 99%"
+            )
+        }
+
+        if !r.thermalPass {
+            failures.append(
+                "Temperature exceeds 60 C"
+            )
+        }
+
+        if !r.timePass {
+            failures.append(
+                "Charge time exceeds 36 minutes"
+            )
+        }
+
+        if !r.mechanicalPass {
+            failures.append(
+                "Mechanical stress exceeds 900 MPa"
+            )
+        }
+
+        r.failureReasons =
+            failures
 
         r.overallPass =
             r.energyPass &&
@@ -1963,223 +1725,5 @@ final class QRTLBatteryEngine: ObservableObject {
             r.mechanicalPass
 
         result = r
-    }
-
-    // ============================================================
-    // EFFECTIVE DIFFUSIVITY
-    // ============================================================
-
-    private func effectiveDiffusivity(
-        _ cell: QRTLCAChargeCell
-    ) -> Double {
-
-        let base =
-            max(
-                QRTLConstants.lithiumDiffusivityM2s,
-                1e-12
-            )
-
-        return clamp(
-            base *
-            cell.porosity /
-            max(
-                cell.tortuosity,
-                1.0
-            ),
-            1e-14,
-            1e-4
-        )
-    }
-
-    // ============================================================
-    // THERMAL HELPERS
-    // ============================================================
-
-    private func localHeatCapacity(
-        for cell: QRTLCAChargeCell
-    ) -> Double {
-
-        let aluminumFraction =
-            clamp(
-                cell.solidFraction,
-                0.0,
-                1.0
-            )
-
-        let effectiveSpecificHeat =
-            aluminumFraction *
-            900.0 +
-            (
-                1.0 -
-                aluminumFraction
-            ) *
-            1800.0
-
-        let volume =
-            max(
-                QRTLConstants.caCellLengthM *
-                QRTLConstants.caCellLengthM *
-                QRTLConstants.caCellLengthM,
-                1e-15
-            )
-
-        let density =
-            aluminumFraction *
-            2700.0 +
-            (
-                1.0 -
-                aluminumFraction
-            ) *
-            1200.0
-
-        return max(
-            density *
-            volume *
-            effectiveSpecificHeat,
-            1e-9
-        )
-    }
-
-    private func localCoolingConductance(
-        for cell: QRTLCAChargeCell
-    ) -> Double {
-
-        let area =
-            max(
-                QRTLConstants.tpmsThermalAreaM2PerCell,
-                1e-8
-            )
-
-        let coefficient =
-            max(
-                QRTLConstants.thermalConvectionCoefficientWm2K,
-                0.0
-            )
-
-        return coefficient * area
-    }
-
-    private func boundedThermalConductance(
-        from a: QRTLCAChargeCell,
-        to b: QRTLCAChargeCell
-    ) -> Double {
-
-        let conductivity =
-            max(
-                QRTLConstants.thermalConductivityWmK,
-                0.01
-            )
-
-        let area =
-            max(
-                QRTLConstants.caCellLengthM *
-                QRTLConstants.caCellLengthM,
-                1e-12
-            )
-
-        let length =
-            max(
-                QRTLConstants.caCellLengthM,
-                1e-6
-            )
-
-        let porosity =
-            0.5 *
-            (
-                clamp(a.porosity, 0.01, 1.0) +
-                clamp(b.porosity, 0.01, 1.0)
-            )
-
-        return clamp(
-            conductivity *
-            area *
-            porosity /
-            length,
-            0.0,
-            1e6
-        )
-    }
-
-    // ============================================================
-    // DEGRADATION
-    // ============================================================
-
-    private func averageDegradation() -> Double {
-
-        averageDegradation(
-            from: cells
-        )
-    }
-
-    private func averageDegradation(
-        from source: [QRTLCAChargeCell]
-    ) -> Double {
-
-        guard !source.isEmpty else {
-            return 0.0
-        }
-
-        return source.reduce(0.0) {
-            $0 + $1.degradation
-        } /
-        Double(source.count)
-    }
-
-    // ============================================================
-    // MEAN VALUE
-    // ============================================================
-
-    private func meanValue<T>(
-        from source: [QRTLCAChargeCell],
-        keyPath: KeyPath<QRTLCAChargeCell, T>
-    ) -> Double where T: BinaryFloatingPoint {
-
-        guard !source.isEmpty else {
-            return 0.0
-        }
-
-        return source.reduce(0.0) {
-            $0 + Double($1[keyPath: keyPath])
-        } /
-        Double(source.count)
-    }
-
-    // ============================================================
-    // SAFE LOG
-    // ============================================================
-
-    private func safeLog(
-        _ value: Double
-    ) -> Double {
-
-        log(
-            max(
-                value,
-                1e-12
-            )
-        )
-    }
-
-    // ============================================================
-    // CLAMP
-    // ============================================================
-
-    private func clamp(
-        _ value: Double,
-        _ minimum: Double,
-        _ maximum: Double
-    ) -> Double {
-
-        if !value.isFinite {
-            return minimum
-        }
-
-        return min(
-            max(
-                value,
-                minimum
-            ),
-            maximum
-        )
     }
 }
