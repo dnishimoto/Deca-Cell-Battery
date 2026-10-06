@@ -1,4 +1,3 @@
-
 // MARK: - View
 
 import SwiftUI
@@ -12,6 +11,7 @@ struct ContentView: View {
     // ============================================================
 
     private var chargePercent: Double {
+
         guard !engine.cells.isEmpty else {
             return 0.0
         }
@@ -24,31 +24,42 @@ struct ContentView: View {
     }
 
     // ============================================================
+    // HAS CHARGING STARTED?
+    // ============================================================
+
+    private var chargingHasStarted: Bool {
+        engine.generation > 0 ||
+        engine.simulatedTimeS > 0.0 ||
+        chargePercent > 0.0 ||
+        engine.isRunning ||
+        engine.status == "Charge complete"
+    }
+
+    // ============================================================
     // BODY
     // ============================================================
 
     var body: some View {
+
         NavigationStack {
+
             ScrollView {
+
                 VStack(spacing: 16) {
 
                     header
-
                     targetPanel
-
                     chargePanel
-
                     caPanel
-
                     resultPanel
-
                     equationPanel
-
                     assumptionsPanel
                 }
                 .padding()
             }
+
             .toolbar {
+
                 ToolbarItemGroup(placement: .topBarTrailing) {
 
                     Button("RESET") {
@@ -69,6 +80,7 @@ struct ContentView: View {
     // ============================================================
 
     private var header: some View {
+
         VStack(alignment: .leading, spacing: 8) {
 
             Text("QRTL Battery")
@@ -79,9 +91,14 @@ struct ContentView: View {
                 .font(.headline)
 
             HStack {
+
                 Text("Generation: \(engine.generation)")
+
                 Spacer()
-                Text("Time: \(engine.simulatedTimeS / 60.0, specifier: "%.1f") min")
+
+                Text(
+                    "Time: \(engine.simulatedTimeS / 60.0, specifier: "%.1f") min"
+                )
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -93,7 +110,9 @@ struct ContentView: View {
     // ============================================================
 
     private var targetPanel: some View {
+
         GroupBox("BATTERY TARGETS") {
+
             VStack(alignment: .leading, spacing: 8) {
 
                 targetRow(
@@ -108,7 +127,7 @@ struct ContentView: View {
                         QRTLConstants.targetChargePowerW / 1_000_000.0
                     )
                 )
-                
+
                 targetRow(
                     name: "Maximum Mass",
                     value: String(
@@ -140,7 +159,12 @@ struct ContentView: View {
     // BATTERY CHARGE BAR
     // ============================================================
 
+    // ============================================================
+    // BATTERY CHARGE BAR
+    // ============================================================
+
     private var chargePanel: some View {
+
         GroupBox("BATTERY CHARGE") {
 
             VStack(alignment: .leading, spacing: 12) {
@@ -152,10 +176,31 @@ struct ContentView: View {
 
                     Spacer()
 
-                    Text("\(chargePercent, specifier: "%.1f")%")
-                        .font(.title2)
-                        .bold()
-                        .monospacedDigit()
+                    Text(
+                        "\(chargePercent, specifier: "%.1f")%"
+                    )
+                    .font(.title2)
+                    .bold()
+                    .monospacedDigit()
+                }
+
+                // ====================================================
+                // ELAPSED CHARGE TIME
+                // ====================================================
+
+                HStack {
+
+                    Text("Elapsed Charge Time")
+                        .font(.headline)
+
+                    Spacer()
+
+                    Text(
+                        "\(engine.simulatedTimeS / 60.0, specifier: "%.1f") min"
+                    )
+                    .font(.title3)
+                    .bold()
+                    .monospacedDigit()
                 }
 
                 GeometryReader { geometry in
@@ -172,10 +217,14 @@ struct ContentView: View {
                                 : Color.blue
                             )
                             .frame(
-                                width: geometry.size.width *
+                                width:
+                                    geometry.size.width *
                                     CGFloat(
                                         min(
-                                            max(chargePercent / 100.0, 0.0),
+                                            max(
+                                                chargePercent / 100.0,
+                                                0.0
+                                            ),
                                             1.0
                                         )
                                     )
@@ -210,8 +259,11 @@ struct ContentView: View {
                         .frame(width: 8, height: 8)
 
                     if chargePercent >= 99.9 {
+
                         Text("Charge complete")
+
                     } else {
+
                         Text("Charging")
                     }
 
@@ -232,6 +284,7 @@ struct ContentView: View {
     // ============================================================
 
     private var caPanel: some View {
+
         GroupBox("CELLULAR AUTOMATON") {
 
             let width = QRTLConstants.caWidth
@@ -239,7 +292,11 @@ struct ContentView: View {
 
             LazyVGrid(
                 columns: Array(
-                    repeating: GridItem(.flexible(), spacing: 1),
+                    repeating:
+                        GridItem(
+                            .flexible(),
+                            spacing: 1
+                        ),
                     count: width
                 ),
                 spacing: 1
@@ -252,11 +309,15 @@ struct ContentView: View {
 
                     if index < engine.cells.count {
 
-                        let cell = engine.cells[index]
+                        let cell =
+                            engine.cells[index]
 
                         Rectangle()
                             .fill(color(for: cell))
-                            .aspectRatio(1, contentMode: .fit)
+                            .aspectRatio(
+                                1,
+                                contentMode: .fit
+                            )
                     }
                 }
             }
@@ -299,92 +360,187 @@ struct ContentView: View {
     // ============================================================
 
     private var resultPanel: some View {
+
         GroupBox("SIMULATION RESULT") {
 
             VStack(alignment: .leading, spacing: 8) {
 
-                resultRow(
-                    "Battery Charge",
-                    String(format: "%.2f%%", chargePercent)
-                )
+                if !chargingHasStarted {
 
-                resultRow(
-                    "Usable Energy",
-                    String(
-                        format: "%.1f kWh",
-                        engine.result.usableEnergyKWh
+                    VStack(alignment: .leading, spacing: 8) {
+
+                        Text("NOT EVALUATED")
+                            .font(.title2)
+                            .bold()
+
+                        Text(
+                            "Start the charging simulation to evaluate the battery design."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                        Divider()
+
+                        resultRow(
+                            "Battery Charge",
+                            "0.00%"
+                        )
+
+                        resultRow(
+                            "Usable Energy",
+                            "0.0 kWh"
+                        )
+
+                        resultRow(
+                            "Power Capability",
+                            String(
+                                format: "%.2f MW",
+                                QRTLConstants.targetChargePowerW /
+                                1_000_000.0
+                            )
+                        )
+
+                        resultRow(
+                            "Charge Time",
+                            "—"
+                        )
+
+                        resultRow(
+                            "Pack Mass",
+                            "—"
+                        )
+
+                        resultRow(
+                            "Specific Energy",
+                            "—"
+                        )
+
+                        resultRow(
+                            "Efficiency",
+                            "—"
+                        )
+
+                        resultRow(
+                            "Maximum Temperature",
+                            "—"
+                        )
+
+                        resultRow(
+                            "Maximum Stress",
+                            "—"
+                        )
+                    }
+
+                } else {
+
+                    resultRow(
+                        "Battery Charge",
+                        String(
+                            format: "%.2f%%",
+                            chargePercent
+                        )
                     )
-                )
 
-                resultRow(
-                    "Power Capability",
-                    String(
-                        format: "%.2f MW",
-                        engine.result.powerCapabilityW / 1_000_000.0
+                    resultRow(
+                        "Usable Energy",
+                        String(
+                            format: "%.1f kWh",
+                            engine.result.usableEnergyKWh
+                        )
                     )
-                )
 
-                resultRow(
-                    "Charge Time",
-                    String(
-                        format: "%.1f min",
-                        engine.result.chargeTimeHours * 60.0
+                    resultRow(
+                        "Power Capability",
+                        String(
+                            format: "%.2f MW",
+                            engine.result.powerCapabilityW /
+                            1_000_000.0
+                        )
                     )
-                )
 
-                resultRow(
-                    "Pack Mass",
-                    String(
-                        format: "%.1f kg",
-                        engine.result.packMassKg
+                    resultRow(
+                        "Charge Time",
+                        String(
+                            format: "%.1f min",
+                            engine.result.chargeTimeHours * 60.0
+                        )
                     )
-                )
 
-                resultRow(
-                    "Specific Energy",
-                    String(
-                        format: "%.0f Wh/kg",
-                        engine.result.specificEnergyWhKg
+                    resultRow(
+                        "Pack Mass",
+                        String(
+                            format: "%.1f kg",
+                            engine.result.packMassKg
+                        )
                     )
-                )
 
-                resultRow(
-                    "Efficiency",
-                    String(
-                        format: "%.2f%%",
-                        engine.result.efficiency * 100.0
+                    resultRow(
+                        "Specific Energy",
+                        String(
+                            format: "%.0f Wh/kg",
+                            engine.result.specificEnergyWhKg
+                        )
                     )
-                )
 
-                resultRow(
-                    "Maximum Temperature",
-                    String(
-                        format: "%.1f °C",
-                        engine.result.maxTemperatureC
+                    resultRow(
+                        "Efficiency",
+                        String(
+                            format: "%.2f%%",
+                            engine.result.efficiency * 100.0
+                        )
                     )
-                )
 
-                resultRow(
-                    "Maximum Stress",
-                    String(
-                        format: "%.1f MPa",
-                        engine.result.maximumStressMPa / 1_000_000.0
+                    resultRow(
+                        "Maximum Temperature",
+                        String(
+                            format: "%.1f °C",
+                            engine.result.maxTemperatureC
+                        )
                     )
-                )
-                Divider()
 
-                Text(
-                    engine.result.overallPass
-                    ? "PASS"
-                    : "FAIL"
-                )
-                .font(.title2)
-                .bold()
-                .foregroundStyle(
-                    engine.result.overallPass
-                    ? .green
-                    : .red
-                )
+                    resultRow(
+                        "Maximum Stress",
+                        String(
+                            format: "%.1f MPa",
+                            engine.result.maximumStressMPa / 1_000_000.0
+                        )
+                    )
+
+                    Divider()
+
+                    Text(
+                        engine.result.overallPass
+                        ? "PASS"
+                        : "FAIL"
+                    )
+                    .font(.title2)
+                    .bold()
+                    .foregroundStyle(
+                        engine.result.overallPass
+                        ? .green
+                        : .red
+                    )
+
+                    if !engine.result.overallPass &&
+                        !engine.result.failureReasons.isEmpty {
+
+                        VStack(alignment: .leading, spacing: 4) {
+
+                            Text("Failure Reasons")
+                                .font(.headline)
+
+                            ForEach(
+                                engine.result.failureReasons,
+                                id: \.self
+                            ) { reason in
+
+                                Text("• \(reason)")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -394,6 +550,7 @@ struct ContentView: View {
     // ============================================================
 
     private var equationPanel: some View {
+
         GroupBox("MODEL EQUATIONS") {
 
             VStack(alignment: .leading, spacing: 8) {
@@ -449,6 +606,7 @@ struct ContentView: View {
     // ============================================================
 
     private var assumptionsPanel: some View {
+
         GroupBox("ASSUMPTIONS") {
 
             VStack(alignment: .leading, spacing: 6) {
@@ -484,6 +642,7 @@ struct ContentView: View {
     ) -> some View {
 
         HStack {
+
             Text(name)
 
             Spacer()
@@ -500,6 +659,7 @@ struct ContentView: View {
     ) -> some View {
 
         HStack {
+
             Text(name)
 
             Spacer()

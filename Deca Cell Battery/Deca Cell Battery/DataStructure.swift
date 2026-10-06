@@ -239,7 +239,7 @@ struct QRTLConstants {
     //
     // This is NOT the wall-clock runtime of the computer.
     // It represents physical time represented by each CA step.
-    static let simSecondsPerStep = 60 * 60 * 0.10
+    static let simSecondsPerStep = 60.0
 
     static let caTransportCoefficient = 0.18
     static let caAcceptanceModulation = 0.25

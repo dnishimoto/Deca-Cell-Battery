@@ -1,4 +1,3 @@
-
 //
 //  QRTLBatteryEngine.swift
 //  Deca Cell Battery
@@ -13,64 +12,51 @@ import Combine
 final class QRTLBatteryEngine: ObservableObject {
 
     // ============================================================
-    // MARK: Published State
+    // MARK: - Published State
     // ============================================================
 
     @Published var cells: [QRTLCAChargeCell] = []
-
     @Published var generation = 0
-
     @Published var isRunning = false
-
+    @Published var hasStarted = false
     @Published var result = QRTLDesignResult()
-
     @Published var status = "Ready"
 
-    // This is simulation time, not computer wall-clock time.
+    // Simulation time, not computer wall-clock time.
     @Published var simulatedTimeS = 0.0
 
     // ============================================================
-    // MARK: Internal CA Data
+    // MARK: - Internal CA Data
     // ============================================================
 
     private var neighborTable: [[Int]] = []
-
     private var acceptance: [Double] = []
-
     private var meanTransport: [Double] = []
-
     private var nodeResistanceOhm: [Double] = []
-
     private var localCurrentA: [Double] = []
-
     private var electrolytePotentialV: [Double] = []
-
     private var effectiveCellResistanceOhm: [Double] = []
 
     // ============================================================
-    // MARK: Energy Accounting
+    // MARK: - Energy Accounting
     // ============================================================
 
     private var cumulativeInputEnergyJ = 0.0
-
     private var cumulativeLossEnergyJ = 0.0
 
     // ============================================================
-    // MARK: Numerical Safety
+    // MARK: - Numerical Safety
     // ============================================================
 
     private let minimumResistanceOhm = 1e-9
-
     private let minimumConcentration = 1e-9
-
     private let minimumTemperatureK = 250.0
-
     private let maximumTemperatureK = 450.0
 
     private var runTask: Task<Void, Never>?
 
     // ============================================================
-    // MARK: 1 MW Charge Station
+    // MARK: - 1 MW Charge Station
     // ============================================================
 
     private var chargeStationPowerW: Double {
@@ -78,19 +64,17 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     private var chargeStationCurrentA: Double {
-
         chargeStationPowerW /
         max(QRTLConstants.packVoltageV, 1e-9)
     }
 
     private var chargeStationCellCurrentA: Double {
-
         chargeStationCurrentA /
         Double(QRTLConstants.parallelStrings)
     }
 
     // ============================================================
-    // MARK: Reset
+    // MARK: - Reset
     // ============================================================
 
     func reset() {
@@ -99,16 +83,15 @@ final class QRTLBatteryEngine: ObservableObject {
         runTask = nil
 
         isRunning = false
+        hasStarted = false
 
         generation = 0
-
         simulatedTimeS = 0.0
 
         cumulativeInputEnergyJ = 0.0
         cumulativeLossEnergyJ = 0.0
 
         cells.removeAll()
-
         neighborTable.removeAll()
         acceptance.removeAll()
         meanTransport.removeAll()
@@ -119,13 +102,16 @@ final class QRTLBatteryEngine: ObservableObject {
 
         buildCA()
 
+        // Calculate the physical design numbers,
+        // but ContentView should not display PASS/FAIL
+        // until charging has actually started.
         calculateDesignResult()
 
         status = "Ready"
     }
 
     // ============================================================
-    // MARK: Run
+    // MARK: - Run
     // ============================================================
 
     func run() {
@@ -134,8 +120,8 @@ final class QRTLBatteryEngine: ObservableObject {
 
         reset()
 
+        hasStarted = true
         isRunning = true
-
         status = "Charging from 1 MW station"
 
         runTask = Task { @MainActor [weak self] in
@@ -152,23 +138,483 @@ final class QRTLBatteryEngine: ObservableObject {
                     break
                 }
 
-                // Yield to SwiftUI.
-                //
-                // This controls computer scheduling only.
-                // It does NOT represent battery charging time.
                 await Task.yield()
             }
         }
     }
 
+
     // ============================================================
-    // MARK: Stop
+    // MARK: - Advance
+    // ============================================================
+
+    func advance() {
+
+        guard !cells.isEmpty else {
+
+            isRunning = false
+            status = "No CA cells"
+
+            return
+        }
+
+        let targetSOC =
+            QRTLConstants.chargeCompleteSOC
+
+        let averageSOC =
+            cells.reduce(0.0) {
+                $0 + $1.soc
+            } / Double(cells.count)
+
+        // Already complete.
+        if averageSOC >= targetSOC {
+
+            isRunning = false
+            status = "Charge complete"
+
+            calculateDesignResult()
+
+            return
+        }
+
+        // --------------------------------------------------------
+        // Physical cell capacity in ampere-seconds.
+        // --------------------------------------------------------
+
+        let cellCapacityAs =
+            QRTLConstants.cellCapacityAh *
+            3600.0
+
+        guard cellCapacityAs > 0.0 else {
+
+            isRunning = false
+            status = "Invalid cell capacity"
+
+            calculateDesignResult()
+
+            return
+        }
+
+        // --------------------------------------------------------
+        // 1 MW physical charging current.
+        //
+        // IMPORTANT:
+        // This is NOT divided by the 31 × 31 CA node count.
+        // --------------------------------------------------------
+
+        let physicalCellCurrentA =
+            chargeStationCellCurrentA
+
+        guard physicalCellCurrentA > 0.0 else {
+
+            isRunning = false
+            status = "Invalid charging current"
+
+            calculateDesignResult()
+
+            return
+        }
+
+        // --------------------------------------------------------
+        // SOC remaining to the 99.9% completion threshold.
+        // --------------------------------------------------------
+
+        let remainingSOC =
+            max(
+                targetSOC - averageSOC,
+                0.0
+            )
+
+        // --------------------------------------------------------
+        // Exact physical time remaining.
+        //
+        // Δt = ΔSOC × Q / I
+        // --------------------------------------------------------
+
+        let secondsToTarget =
+            remainingSOC *
+            cellCapacityAs /
+            physicalCellCurrentA
+
+        // --------------------------------------------------------
+        // Normal simulation step = 60 seconds.
+        //
+        // The final step is automatically shortened.
+        // Therefore:
+        //
+        // 36:00 -> ~99.732%
+        // 36:03.x -> 99.9%
+        // --------------------------------------------------------
+
+        let dt =
+            min(
+                QRTLConstants.simSecondsPerStep,
+                secondsToTarget
+            )
+
+        guard dt > 0.0 else {
+
+            isRunning = false
+            status = "Charge complete"
+
+            calculateDesignResult()
+
+            return
+        }
+
+        // --------------------------------------------------------
+        // Run one coupled simulation step.
+        // --------------------------------------------------------
+
+        step(dt: dt)
+
+        generation += 1
+
+        simulatedTimeS += dt
+
+        // --------------------------------------------------------
+        // Calculate new SOC.
+        // --------------------------------------------------------
+
+        let updatedAverageSOC =
+            cells.reduce(0.0) {
+                $0 + $1.soc
+            } / Double(cells.count)
+
+        // Update result periodically.
+        if generation % 10 == 0 ||
+            updatedAverageSOC >= targetSOC {
+
+            calculateDesignResult()
+        }
+
+        // --------------------------------------------------------
+        // Completion.
+        // --------------------------------------------------------
+
+        if updatedAverageSOC >= targetSOC {
+
+            for index in cells.indices {
+
+                cells[index].soc =
+                    max(
+                        cells[index].soc,
+                        targetSOC
+                    )
+
+                if index < acceptance.count {
+
+                    acceptance[index] = 1.0
+                }
+            }
+
+            isRunning = false
+            status = "Charge complete"
+
+            calculateDesignResult()
+
+            return
+        }
+
+        // --------------------------------------------------------
+        // Safety limit.
+        // --------------------------------------------------------
+
+        if generation >= QRTLConstants.caIterations {
+
+            isRunning = false
+            status = "Simulation limit reached"
+
+            calculateDesignResult()
+        }
+    }
+
+
+    // ============================================================
+    // MARK: - Step
+    // ============================================================
+
+    private func step(dt: Double) {
+
+        relaxElectrolytePotential()
+
+        updateLocalCurrent()
+
+        updateSOC(dt: dt)
+
+        updateTransport()
+
+        updateResonator()
+
+        updateElectrochemistry()
+
+        updateThermalState(dt: dt)
+
+        updateMechanicalState()
+
+        updateDegradation(dt: dt)
+
+        finalizeCells()
+
+        updatePackEnergy(dt: dt)
+    }
+
+
+    // ============================================================
+    // MARK: - SOC
+    // ============================================================
+
+    private func updateSOC(dt: Double) {
+
+        let cellCapacityAs =
+            QRTLConstants.cellCapacityAh *
+            3600.0
+
+        guard cellCapacityAs > 0.0 else {
+            return
+        }
+
+        // 1 MW charging station is authoritative.
+        //
+        // The CA grid is a spatial model, not 961 physical cells.
+        let physicalCellCurrentA =
+            chargeStationCellCurrentA
+
+        let deltaSOC =
+            physicalCellCurrentA *
+            dt /
+            cellCapacityAs
+
+        guard deltaSOC > 0.0 else {
+            return
+        }
+
+        for index in cells.indices {
+
+            cells[index].soc =
+                clamp(
+                    cells[index].soc + deltaSOC,
+                    0.0,
+                    1.0
+                )
+
+            let soc =
+                cells[index].soc
+
+            if index < acceptance.count {
+
+                acceptance[index] =
+                    clamp(
+                        soc /
+                        QRTLConstants.chargeCompleteSOC,
+                        0.0,
+                        1.0
+                    )
+            }
+        }
+    }
+
+
+    // ============================================================
+    // MARK: - Thermal State
+    // ============================================================
+
+    private func updateThermalState(dt: Double) {
+
+        for index in cells.indices {
+
+            let current =
+                abs(
+                    localCurrentA[index]
+                )
+
+            let resistance =
+                max(
+                    cells[index].impedanceOhm,
+                    minimumResistanceOhm
+                )
+
+            let ohmicHeat =
+                current *
+                current *
+                resistance
+
+            let reactionHeat =
+                current *
+                abs(
+                    cells[index].overpotentialV
+                )
+
+            let resonatorHeat =
+                cells[index].resonatorLossW
+
+            let totalHeat =
+                ohmicHeat +
+                reactionHeat +
+                resonatorHeat
+
+            cells[index].heatGenerationW =
+                totalHeat
+
+            let area =
+                max(
+                    QRTLConstants.tpmsThermalAreaM2PerCell,
+                    1e-9
+                )
+
+            cells[index].heatFluxWm2 =
+                totalHeat /
+                area
+
+            let cooling =
+                QRTLConstants.heatTransferCoefficientWm2K *
+                area *
+                max(
+                    cells[index].temperatureC -
+                    QRTLConstants.ambientTemperatureC,
+                    0.0
+                )
+
+            let netHeat =
+                totalHeat -
+                cooling
+
+            let deltaT =
+                netHeat *
+                dt /
+                max(
+                    QRTLConstants.cellHeatCapacityJPerK,
+                    1.0
+                )
+
+            cells[index].temperatureC =
+                clamp(
+                    cells[index].temperatureC +
+                    deltaT,
+                    QRTLConstants.ambientTemperatureC,
+                    QRTLConstants.maximumTemperatureC
+                )
+
+            if cells[index].temperatureC >=
+                QRTLConstants.maximumTemperatureC {
+
+                cells[index].state =
+                    .thermal
+            }
+        }
+    }
+
+
+    // ============================================================
+    // MARK: - Degradation
+    // ============================================================
+
+    private func updateDegradation(dt: Double) {
+
+        for index in cells.indices {
+
+            let increment =
+                QRTLConstants.degradationCoefficientPerCycle *
+                dt /
+                (24.0 * 3600.0)
+
+            cells[index].degradation =
+                clamp(
+                    cells[index].degradation +
+                    increment,
+                    0.0,
+                    1.0
+                )
+
+            cells[index].sulfurFraction =
+                clamp(
+                    1.0 -
+                    cells[index].degradation,
+                    0.0,
+                    1.0
+                )
+        }
+    }
+
+
+    // ============================================================
+    // MARK: - Pack Energy
+    // ============================================================
+
+    private func updatePackEnergy(dt: Double) {
+
+        let inputPowerW =
+            QRTLConstants.targetChargePowerW
+
+        let inputEnergyJ =
+            inputPowerW * dt
+
+        cumulativeInputEnergyJ +=
+            inputEnergyJ
+
+        var lossPowerW = 0.0
+
+        for cell in cells {
+
+            let current =
+                abs(
+                    cell.electronicCurrentDensity
+                ) *
+                QRTLConstants.activeElectrodeAreaM2PerCell
+
+            let resistance =
+                max(
+                    cell.impedanceOhm,
+                    minimumResistanceOhm
+                )
+
+            let ohmic =
+                current *
+                current *
+                resistance
+
+            let reaction =
+                current *
+                abs(
+                    cell.overpotentialV
+                )
+
+            lossPowerW +=
+                ohmic +
+                reaction +
+                cell.resonatorLossW
+        }
+
+        let scale =
+            Double(QRTLConstants.cellCount) /
+            Double(max(cells.count, 1))
+
+        let scaledLossPower =
+            lossPowerW * scale
+
+        cumulativeLossEnergyJ +=
+            scaledLossPower * dt
+
+        for index in cells.indices {
+
+            cells[index].chargeEnergyJ +=
+                max(
+                    localCurrentA[index] *
+                    cells[index].localVoltageV *
+                    dt,
+                    0.0
+                )
+        }
+    }
+  
+
+    // ============================================================
+    // MARK: - Stop
     // ============================================================
 
     func stop() {
 
         runTask?.cancel()
-
         runTask = nil
 
         isRunning = false
@@ -179,68 +625,17 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Advance
+    // MARK: - Advance
     // ============================================================
-
-    func advance() {
-
-        guard !cells.isEmpty else {
-            isRunning = false
-            status = "No CA cells"
-            return
-        }
-
-        step()
-
-        generation += 1
-
-        simulatedTimeS +=
-            QRTLConstants.simSecondsPerStep
-
-        // Update the displayed battery result while charging.
-        // This does not control the charging physics.
-        if generation % 10 == 0 {
-            calculateDesignResult()
-        }
-
-        let averageSOC =
-            cells.reduce(0.0) {
-                $0 + $1.soc
-            } /
-            Double(cells.count)
-
-        if averageSOC >=
-            QRTLConstants.chargeCompleteSOC {
-
-            isRunning = false
-
-            status = "Charge complete"
-
-            calculateDesignResult()
-
-            return
-        }
-
-        if generation >=
-            QRTLConstants.caIterations {
-
-            isRunning = false
-
-            status = "Simulation limit reached"
-
-            calculateDesignResult()
-        }
-    }
-
+   
     // ============================================================
-    // MARK: Build CA
+    // MARK: - Build CA
     // ============================================================
 
     private func buildCA() {
 
         let width = QRTLConstants.caWidth
         let height = QRTLConstants.caHeight
-
         let count = width * height
 
         cells = []
@@ -271,7 +666,7 @@ final class QRTLBatteryEngine: ObservableObject {
                 let twoPi =
                     2.0 * Double.pi
 
-                // Diamond-like / TPMS reduced slice.
+                // TPMS reduced slice.
                 let phi =
                     sin(twoPi * fx) *
                     cos(twoPi * fy)
@@ -345,27 +740,19 @@ final class QRTLBatteryEngine: ObservableObject {
             var neighbors: [Int] = []
 
             if x > 0 {
-                neighbors.append(
-                    index - 1
-                )
+                neighbors.append(index - 1)
             }
 
             if x < width - 1 {
-                neighbors.append(
-                    index + 1
-                )
+                neighbors.append(index + 1)
             }
 
             if y > 0 {
-                neighbors.append(
-                    index - width
-                )
+                neighbors.append(index - width)
             }
 
             if y < height - 1 {
-                neighbors.append(
-                    index + width
-                )
+                neighbors.append(index + width)
             }
 
             neighborTable[index] = neighbors
@@ -476,36 +863,26 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Step
+    // MARK: - Step
     // ============================================================
 
     private func step() {
 
         relaxElectrolytePotential()
-
         updateLocalCurrent()
-
         updateSOC()
-
         updateTransport()
-
         updateResonator()
-
         updateElectrochemistry()
-
         updateThermalState()
-
         updateMechanicalState()
-
         updateDegradation()
-
         finalizeCells()
-
         updatePackEnergy()
     }
 
     // ============================================================
-    // MARK: Electrolyte Potential
+    // MARK: - Electrolyte Potential
     // ============================================================
 
     private func relaxElectrolytePotential() {
@@ -517,13 +894,14 @@ final class QRTLBatteryEngine: ObservableObject {
         var newPotential =
             electrolytePotentialV
 
-        let width = QRTLConstants.caWidth
+        let width =
+            QRTLConstants.caWidth
 
         for index in cells.indices {
 
-            let x = cells[index].x
+            let x =
+                cells[index].x
 
-            // Fixed charging boundary.
             if x == 0 {
 
                 newPotential[index] = 0.0
@@ -556,7 +934,8 @@ final class QRTLBatteryEngine: ObservableObject {
                     electrolytePotentialV[neighbor] *
                     conductance
 
-                totalWeight += conductance
+                totalWeight +=
+                    conductance
             }
 
             if totalWeight > 0.0 {
@@ -565,8 +944,7 @@ final class QRTLBatteryEngine: ObservableObject {
                     weightedPotential /
                     totalWeight
 
-                let relaxation =
-                    0.25
+                let relaxation = 0.25
 
                 newPotential[index] =
                     electrolytePotentialV[index] *
@@ -576,7 +954,6 @@ final class QRTLBatteryEngine: ObservableObject {
                     relaxation
             }
 
-            // Right side receives the terminal potential.
             if x == width - 1 {
 
                 newPotential[index] =
@@ -595,7 +972,7 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Local Current
+    // MARK: - Local Current
     // ============================================================
 
     private func updateLocalCurrent() {
@@ -608,16 +985,15 @@ final class QRTLBatteryEngine: ObservableObject {
         // 1 MW CHARGING STATION
         // ========================================================
         //
-        // 1 MW / 999 V ≈ 1,001 A pack current
+        // 1 MW / 999 V ≈ 1,001 A pack current.
         //
         // 1,001 A / 6 parallel strings ≈ 167 A
         // per physical cell/string.
         //
-        // The 31 x 31 CA grid represents the INTERNAL
-        // spatial structure of one physical cell.
+        // The CA grid is the INTERNAL spatial structure
+        // of one physical cell.
         //
-        // Therefore we do NOT divide 167 A by 961.
-        //
+        // We therefore do NOT divide 167 A by 961.
         // ========================================================
 
         let physicalCellCurrentA =
@@ -663,16 +1039,6 @@ final class QRTLBatteryEngine: ObservableObject {
             return
         }
 
-        // ========================================================
-        // IMPORTANT:
-        //
-        // Each CA node receives a representative current centered
-        // around the physical cell current.
-        //
-        // The average of all CA-node currents is therefore the
-        // physical cell current, approximately 167 A.
-        // ========================================================
-
         let nodeCount =
             Double(cells.count)
 
@@ -682,12 +1048,9 @@ final class QRTLBatteryEngine: ObservableObject {
                 conductances[index] /
                 weightedTotal
 
-            // Convert the normalized CA fraction into a
-            // spatial multiplier around the physical-cell current.
-            //
-            // Average multiplier = approximately 1.0.
             let multiplier =
-                fraction * nodeCount
+                fraction *
+                nodeCount
 
             let current =
                 physicalCellCurrentA *
@@ -706,75 +1069,57 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: SOC
+    // MARK: - SOC
     // ============================================================
 
     private func updateSOC() {
+        let dt = QRTLConstants.simSecondsPerStep
 
-        let dt =
-            QRTLConstants.simSecondsPerStep
+        let cellCapacityAs =
+            QRTLConstants.cellCapacityAh * 3600.0
 
-        let capacityAs =
-            QRTLConstants.cellCapacityAh *
-            3600.0
+        guard cellCapacityAs > 0.0 else {
+            return
+        }
 
-        guard capacityAs > 0.0 else {
+        // Physical current delivered by the 1 MW charging station.
+        // The CA grid represents spatial behavior; it does not
+        // divide the physical charging current among CA nodes.
+        let physicalCellCurrentA =
+            chargeStationCellCurrentA
+
+        let deltaSOC =
+            physicalCellCurrentA *
+            dt /
+            cellCapacityAs
+
+        guard deltaSOC > 0.0 else {
             return
         }
 
         for index in cells.indices {
 
-            let current =
-                max(
-                    localCurrentA[index],
-                    0.0
-                )
-
-            let deltaSOC =
-                current *
-                dt /
-                capacityAs
-
-            let transport =
-                clamp(
-                    transportFactor(cells[index]),
-                    0.05,
-                    1.0
-                )
-
-            var newSOC =
-                cells[index].soc +
-                deltaSOC *
-                transport
-
-            // Neighbor mixing keeps the CA spatially coupled.
-            let neighbors =
-                neighborTable[index]
-
-            if !neighbors.isEmpty {
-
-                let neighborSOC =
-                    neighbors.reduce(0.0) {
-                        $0 + cells[$1].soc
-                    } /
-                    Double(neighbors.count)
-
-                newSOC =
-                    newSOC * 0.90 +
-                    neighborSOC * 0.10
-            }
-
             cells[index].soc =
                 clamp(
-                    newSOC,
+                    cells[index].soc + deltaSOC,
                     0.0,
                     1.0
                 )
+
+            let soc = cells[index].soc
+
+            if index < acceptance.count {
+                acceptance[index] =
+                    clamp(
+                        soc / QRTLConstants.chargeCompleteSOC,
+                        0.0,
+                        1.0
+                    )
+            }
         }
     }
-
     // ============================================================
-    // MARK: Transport
+    // MARK: - Transport
     // ============================================================
 
     private func updateTransport() {
@@ -794,8 +1139,7 @@ final class QRTLBatteryEngine: ObservableObject {
                 diffusivity *
                 transport *
                 max(
-                    1.0 -
-                    cell.soc,
+                    1.0 - cell.soc,
                     0.0
                 )
 
@@ -810,7 +1154,7 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Resonator
+    // MARK: - Resonator
     // ============================================================
 
     private func updateResonator() {
@@ -836,10 +1180,7 @@ final class QRTLBatteryEngine: ObservableObject {
 
             let amplitude =
                 sqrt(
-                    max(
-                        drive,
-                        0.0
-                    ) /
+                    max(drive, 0.0) /
                     max(
                         damping *
                         omega *
@@ -878,7 +1219,7 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Electrochemistry
+    // MARK: - Electrochemistry
     // ============================================================
 
     private func updateElectrochemistry() {
@@ -904,7 +1245,6 @@ final class QRTLBatteryEngine: ObservableObject {
                     0.999999
                 )
 
-            // Nernst-like equilibrium relationship.
             let equilibrium =
                 QRTLConstants.cellNominalVoltageV
                 +
@@ -924,12 +1264,13 @@ final class QRTLBatteryEngine: ObservableObject {
                     3.0
                 )
 
-            // Temperature-adjusted exchange current.
             let activation =
                 -QRTLConstants.exchangeCurrentActivationEnergyJMol /
                 QRTLConstants.gasConstant *
-                (1.0 / temperatureK -
-                 1.0 / Tref)
+                (
+                    1.0 / temperatureK -
+                    1.0 / Tref
+                )
 
             let exchange =
                 QRTLConstants.referenceExchangeCurrentAm2 *
@@ -953,7 +1294,6 @@ final class QRTLBatteryEngine: ObservableObject {
                     1e-12
                 )
 
-            // Reduced Butler-Volmer / asinh form.
             let thermalVoltage =
                 QRTLConstants.gasConstant *
                 temperatureK /
@@ -964,8 +1304,7 @@ final class QRTLBatteryEngine: ObservableObject {
                 thermalVoltage /
                 QRTLConstants.chargeTransferCoefficient *
                 asinh(
-                    ratio /
-                    2.0
+                    ratio / 2.0
                 )
 
             cells[index].overpotentialV =
@@ -1004,7 +1343,7 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Thermal
+    // MARK: - Thermal
     // ============================================================
 
     private func updateThermalState() {
@@ -1096,7 +1435,7 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Mechanics
+    // MARK: - Mechanics
     // ============================================================
 
     private func updateMechanicalState() {
@@ -1129,7 +1468,7 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Degradation
+    // MARK: - Degradation
     // ============================================================
 
     private func updateDegradation() {
@@ -1160,7 +1499,7 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Finalize Cells
+    // MARK: - Finalize Cells
     // ============================================================
 
     private func finalizeCells() {
@@ -1191,15 +1530,12 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Pack Energy
+    // MARK: - Pack Energy
     // ============================================================
 
     private func updatePackEnergy() {
 
-        // ========================================================
-        // The external station supplies exactly 1 MW.
-        // ========================================================
-
+        // External station supplies exactly 1 MW.
         let inputPowerW =
             QRTLConstants.targetChargePowerW
 
@@ -1271,7 +1607,7 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Mean Value
+    // MARK: - Mean Value
     // ============================================================
 
     private func meanValue(
@@ -1290,7 +1626,7 @@ final class QRTLBatteryEngine: ObservableObject {
     }
 
     // ============================================================
-    // MARK: Calculate Design Result
+    // MARK: - Calculate Design Result
     // ============================================================
 
     func calculateDesignResult() {
@@ -1328,14 +1664,27 @@ final class QRTLBatteryEngine: ObservableObject {
                 keyPath: \.soc
             )
 
-        r.usableEnergyKWh =
-            r.ratedEnergyKWh *
-            r.averageSOC *
-            (1.0 -
-             meanValue(
+        let averageDegradation =
+            meanValue(
                 from: cells,
                 keyPath: \.degradation
-             ))
+            )
+
+        r.usableEnergyKWh =
+            r.ratedEnergyKWh *
+            clamp(
+                r.averageSOC,
+                0.0,
+                1.0
+            ) *
+            (
+                1.0 -
+                clamp(
+                    averageDegradation,
+                    0.0,
+                    1.0
+                )
+            )
 
         // ========================================================
         // Mass
@@ -1345,7 +1694,6 @@ final class QRTLBatteryEngine: ObservableObject {
             QRTLConstants.sulfurMassPerCellKg *
             Double(QRTLConstants.cellCount)
 
-        // Approximate lithium inventory.
         r.lithiumMassKg =
             r.sulfurMassKg *
             6.94 /
@@ -1407,7 +1755,10 @@ final class QRTLBatteryEngine: ObservableObject {
         r.specificEnergyWhKg =
             r.ratedEnergyKWh *
             1000.0 /
-            max(r.packMassKg, 1e-9)
+            max(
+                r.packMassKg,
+                1e-9
+            )
 
         // ========================================================
         // Electrical
@@ -1420,47 +1771,75 @@ final class QRTLBatteryEngine: ObservableObject {
             ) /
             Double(QRTLConstants.seriesCells)
 
-        let stationCurrent =
-            chargeStationCurrentA
+        // ========================================================
+        // Fixed 1 MW station
+        // ========================================================
+
+        let stationPowerW =
+            QRTLConstants.targetChargePowerW
+
+        let stationCurrentA =
+            stationPowerW /
+            max(
+                QRTLConstants.packVoltageV,
+                1e-9
+            )
+
+        // ========================================================
+        // Losses
+        // ========================================================
 
         r.ohmicLossW =
-            stationCurrent *
-            stationCurrent *
+            stationCurrentA *
+            stationCurrentA *
             max(
                 r.totalResistanceOhm,
                 minimumResistanceOhm
             )
 
+        let averageOverpotential =
+            max(
+                meanValue(
+                    from: cells,
+                    keyPath: \.overpotentialV
+                ),
+                0.0
+            )
+
         r.reactionLossW =
-            stationCurrent *
+            stationCurrentA *
+            averageOverpotential
+
+        let averageTemperatureC =
             meanValue(
                 from: cells,
-                keyPath: \.overpotentialV
+                keyPath: \.temperatureC
             )
 
         r.entropicHeatW =
             abs(
-                stationCurrent *
+                stationCurrentA *
                 QRTLConstants.entropicCoefficientVPerK *
                 (
-                    meanValue(
-                        from: cells,
-                        keyPath: \.temperatureC
-                    )
-                    -
+                    averageTemperatureC -
                     QRTLConstants.ambientTemperatureC
                 )
             )
 
         r.resonatorLossW =
             cells.reduce(0.0) {
-                $0 + $1.resonatorLossW
+                $0 +
+                max(
+                    $1.resonatorLossW,
+                    0.0
+                )
             } *
             Double(QRTLConstants.cellCount) /
             Double(max(cells.count, 1))
 
         r.thermalLossW =
             cells.reduce(0.0) {
+
                 let delta =
                     max(
                         $1.temperatureC -
@@ -1472,6 +1851,7 @@ final class QRTLBatteryEngine: ObservableObject {
                     QRTLConstants.heatTransferCoefficientWm2K *
                     QRTLConstants.tpmsThermalAreaM2PerCell *
                     delta
+
             } *
             Double(QRTLConstants.cellCount) /
             Double(max(cells.count, 1))
@@ -1487,28 +1867,26 @@ final class QRTLBatteryEngine: ObservableObject {
             )
 
         // ========================================================
-        // 1 MW CHARGING STATION
+        // Charging Power
         // ========================================================
-
-        let stationPowerW =
-            QRTLConstants.targetChargePowerW
 
         r.modeledChargePowerW =
             stationPowerW
 
-        // The charging station itself is capable of supplying
-        // the complete 1 MW target.
         r.powerCapabilityW =
             stationPowerW
 
-        // Electrical efficiency of the modeled battery.
-        //
-        // The external station supplies 1 MW. Losses reduce the
-        // fraction that becomes stored electrochemical energy.
+        // ========================================================
+        // Efficiency
+        // ========================================================
+
         let lossFraction =
             clamp(
                 r.totalLossW /
-                max(stationPowerW, 1.0),
+                max(
+                    stationPowerW,
+                    1.0
+                ),
                 0.0,
                 0.95
             )
@@ -1522,27 +1900,22 @@ final class QRTLBatteryEngine: ObservableObject {
             )
 
         // ========================================================
-        // Physical charge time from the 1 MW station.
+        // Physical Charge Time
         //
-        // DO NOT use simulatedTimeS here.
+        // 600 kWh / 1 MW = 36 minutes IDEAL.
+        //
+        // Actual time increases when efficiency < 100%.
         // ========================================================
 
-        let requiredStationEnergyKWh =
+        let idealChargeTimeHours =
             QRTLConstants.targetEnergyKWh /
+            (stationPowerW / 1_000.0)
+
+        r.chargeTimeHours =
+            idealChargeTimeHours /
             max(
                 r.efficiency,
                 0.01
-            )
-
-        let stationPowerKW =
-            stationPowerW /
-            1_000.0
-
-        r.chargeTimeHours =
-            requiredStationEnergyKWh /
-            max(
-                stationPowerKW,
-                1e-9
             )
 
         // ========================================================
@@ -1550,7 +1923,8 @@ final class QRTLBatteryEngine: ObservableObject {
         // ========================================================
 
         r.maxTemperatureC =
-            cells.map(\.temperatureC).max() ??
+            cells.map(\.temperatureC).max()
+            ??
             QRTLConstants.ambientTemperatureC
 
         r.tpmsSurfaceAreaM2 =
@@ -1563,8 +1937,6 @@ final class QRTLBatteryEngine: ObservableObject {
                 keyPath: \.porosity
             )
 
-        // IMPORTANT:
-        // This is solid fraction, not tortuosity.
         r.tpmsSolidFraction =
             meanValue(
                 from: cells,
@@ -1608,7 +1980,11 @@ final class QRTLBatteryEngine: ObservableObject {
         // ========================================================
 
         r.maximumStressMPa =
-            (cells.map(\.stressPa).max() ?? 0.0) /
+            (
+                cells.map(\.stressPa).max()
+                ??
+                0.0
+            ) /
             1_000_000.0
 
         // ========================================================
@@ -1616,13 +1992,13 @@ final class QRTLBatteryEngine: ObservableObject {
         // ========================================================
 
         r.degradationFraction =
-            meanValue(
-                from: cells,
-                keyPath: \.degradation
-            )
+            averageDegradation
 
         // ========================================================
         // Constraint Checks
+        //
+        // These are REAL design requirements.
+        // They are not forced to PASS.
         // ========================================================
 
         r.energyPass =
@@ -1641,6 +2017,7 @@ final class QRTLBatteryEngine: ObservableObject {
             r.specificEnergyWhKg >=
             QRTLConstants.targetSpecificEnergyWhKg
 
+        // 99% remains a real efficiency requirement.
         r.efficiencyPass =
             r.efficiency >=
             QRTLConstants.minimumEfficiency
@@ -1648,6 +2025,17 @@ final class QRTLBatteryEngine: ObservableObject {
         r.thermalPass =
             r.maxTemperatureC <=
             QRTLConstants.maximumTemperatureC
+
+        // ========================================================
+        // Charge-Time Requirement
+        //
+        // The 36-minute target is the ideal 1 MW reference.
+        //
+        // If the model has losses, actual time can legitimately
+        // exceed 36 minutes.
+        //
+        // Therefore this is evaluated separately from efficiency.
+        // ========================================================
 
         r.timePass =
             r.chargeTimeHours <=
@@ -1664,48 +2052,64 @@ final class QRTLBatteryEngine: ObservableObject {
         var failures: [String] = []
 
         if !r.energyPass {
+
             failures.append(
                 "Rated energy below 600 kWh"
             )
         }
 
         if !r.powerPass {
+
             failures.append(
                 "Charging power below 1 MW"
             )
         }
 
         if !r.massPass {
+
             failures.append(
                 "Pack mass exceeds 300 kg"
             )
         }
 
         if !r.specificEnergyPass {
+
             failures.append(
                 "Specific energy below 2,000 Wh/kg"
             )
         }
 
         if !r.efficiencyPass {
+
             failures.append(
-                "Efficiency below 99%"
+                String(
+                    format:
+                        "Efficiency %.2f%% is below 99%%",
+                    r.efficiency * 100.0
+                )
             )
         }
 
         if !r.thermalPass {
+
             failures.append(
                 "Temperature exceeds 60 C"
             )
         }
 
         if !r.timePass {
+
             failures.append(
-                "Charge time exceeds 36 minutes"
+                String(
+                    format:
+                        "Recharge time %.2f minutes exceeds 36 minutes",
+                    r.chargeTimeHours * 60.0
+                )
             )
         }
 
         if !r.mechanicalPass {
+
             failures.append(
                 "Mechanical stress exceeds 900 MPa"
             )
@@ -1713,6 +2117,10 @@ final class QRTLBatteryEngine: ObservableObject {
 
         r.failureReasons =
             failures
+
+        // ========================================================
+        // Overall Result
+        // ========================================================
 
         r.overallPass =
             r.energyPass &&
@@ -1724,6 +2132,7 @@ final class QRTLBatteryEngine: ObservableObject {
             r.timePass &&
             r.mechanicalPass
 
-        result = r
+        result =
+            r
     }
 }
