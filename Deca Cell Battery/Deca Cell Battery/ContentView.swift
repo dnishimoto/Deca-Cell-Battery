@@ -1,4 +1,4 @@
-// MARK: - View
+
 
 import SwiftUI
 
@@ -7,7 +7,7 @@ struct ContentView: View {
     @StateObject private var engine = QRTLBatteryEngine()
 
     // ============================================================
-    // BATTERY CHARGE PERCENT
+    // MARK: - LIVE CHARGE PERCENT
     // ============================================================
 
     private var chargePercent: Double {
@@ -20,14 +20,76 @@ struct ContentView: View {
             $0 + $1.soc
         } / Double(engine.cells.count)
 
-        return averageSOC * 100.0
+        return min(
+            max(averageSOC * 100.0, 0.0),
+            100.0
+        )
     }
 
     // ============================================================
-    // HAS CHARGING STARTED?
+    // MARK: - LIVE ENERGY
+    // ============================================================
+
+    private var liveEnergyKWh: Double {
+
+        let targetEnergy =
+            QRTLConstants.targetEnergyKWh
+
+        return targetEnergy *
+            (chargePercent / 100.0)
+    }
+
+    // ============================================================
+    // MARK: - ENERGY TARGET PERCENT
+    // ============================================================
+
+    private var energyTargetPercent: Double {
+
+        guard QRTLConstants.targetEnergyKWh > 0 else {
+            return 0.0
+        }
+
+        return min(
+            max(
+                liveEnergyKWh /
+                QRTLConstants.targetEnergyKWh *
+                100.0,
+                0.0
+            ),
+            100.0
+        )
+    }
+
+    // ============================================================
+    // MARK: - POWER TARGET PERCENT
+    // ============================================================
+
+    private var powerTargetPercent: Double {
+
+        guard QRTLConstants.targetChargePowerW > 0 else {
+            return 0.0
+        }
+
+        let power =
+            engine.result.powerCapabilityW
+
+        return min(
+            max(
+                power /
+                QRTLConstants.targetChargePowerW *
+                100.0,
+                0.0
+            ),
+            100.0
+        )
+    }
+
+    // ============================================================
+    // MARK: - HAS CHARGING STARTED?
     // ============================================================
 
     private var chargingHasStarted: Bool {
+
         engine.generation > 0 ||
         engine.simulatedTimeS > 0.0 ||
         chargePercent > 0.0 ||
@@ -36,7 +98,17 @@ struct ContentView: View {
     }
 
     // ============================================================
-    // BODY
+    // MARK: - SIMULATION COMPLETE
+    // ============================================================
+
+    private var simulationComplete: Bool {
+
+        chargePercent >= 99.9 ||
+        engine.status == "Charge complete"
+    }
+
+    // ============================================================
+    // MARK: - BODY
     // ============================================================
 
     var body: some View {
@@ -48,6 +120,17 @@ struct ContentView: View {
                 VStack(spacing: 16) {
 
                     header
+
+                    // =================================================
+                    // PRIMARY MISSION DASHBOARD
+                    // =================================================
+
+                    keyIndicatorsPanel
+
+                    // =================================================
+                    // DETAILED INFORMATION
+                    // =================================================
+
                     targetPanel
                     chargePanel
                     caPanel
@@ -60,13 +143,17 @@ struct ContentView: View {
 
             .toolbar {
 
-                ToolbarItemGroup(placement: .topBarTrailing) {
+                ToolbarItemGroup(
+                    placement: .topBarTrailing
+                ) {
 
                     Button("RESET") {
+
                         engine.reset()
                     }
 
                     Button("RUN CA") {
+
                         engine.run()
                     }
                     .disabled(engine.isRunning)
@@ -76,12 +163,15 @@ struct ContentView: View {
     }
 
     // ============================================================
-    // HEADER
+    // MARK: - HEADER
     // ============================================================
 
     private var header: some View {
 
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(
+            alignment: .leading,
+            spacing: 8
+        ) {
 
             Text("QRTL Battery")
                 .font(.largeTitle)
@@ -92,7 +182,9 @@ struct ContentView: View {
 
             HStack {
 
-                Text("Generation: \(engine.generation)")
+                Text(
+                    "Generation: \(engine.generation)"
+                )
 
                 Spacer()
 
@@ -103,28 +195,478 @@ struct ContentView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
         }
+        .frame(
+            maxWidth: .infinity,
+            alignment: .leading
+        )
     }
 
     // ============================================================
-    // TARGET PANEL
+    // MARK: - KEY INDICATORS
+    // ============================================================
+
+    private var keyIndicatorsPanel: some View {
+
+        VStack(spacing: 12) {
+
+            // ========================================================
+            // DASHBOARD HEADER
+            // ========================================================
+
+            HStack {
+
+                Text("MISSION CONTROL")
+                    .font(.headline)
+
+                Spacer()
+
+                statusIndicator
+            }
+
+            // ========================================================
+            // PRIMARY CHARGE INDICATOR
+            // ========================================================
+
+            primaryChargeCard
+
+            // ========================================================
+            // TIME / GENERATION
+            // ========================================================
+
+            HStack(spacing: 10) {
+
+                indicatorCard(
+                    title: "ELAPSED TIME",
+                    value: String(
+                        format: "%.1f min",
+                        engine.simulatedTimeS / 60.0
+                    ),
+                    systemImage: "clock"
+                )
+
+                indicatorCard(
+                    title: "GENERATION",
+                    value: "\(engine.generation)",
+                    systemImage: "arrow.triangle.2.circlepath"
+                )
+            }
+
+            // ========================================================
+            // POWER / ENERGY
+            // ========================================================
+
+            HStack(spacing: 10) {
+
+                indicatorCard(
+                    title: "CHARGE POWER",
+                    value: String(
+                        format: "%.2f MW",
+                        engine.result.powerCapabilityW /
+                        1_000_000.0
+                    ),
+                    systemImage: "bolt.fill"
+                )
+
+                indicatorCard(
+                    title: "USABLE ENERGY",
+                    value: String(
+                        format: "%.1f kWh",
+                        liveEnergyKWh
+                    ),
+                    systemImage: "battery.100.bolt"
+                )
+            }
+
+            // ========================================================
+            // ENERGY TARGET
+            // ========================================================
+
+            progressTargetCard(
+                title: "600 kWh ENERGY TARGET",
+                progress: energyTargetPercent
+            )
+
+            // ========================================================
+            // POWER TARGET
+            // ========================================================
+
+            progressTargetCard(
+                title: "1 MW CHARGE TARGET",
+                progress: powerTargetPercent
+            )
+
+          
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(
+                cornerRadius: 16
+            )
+            .fill(
+                Color.gray.opacity(0.08)
+            )
+        )
+    }
+
+    // ============================================================
+    // MARK: - STATUS INDICATOR
+    // ============================================================
+
+    private var statusIndicator: some View {
+
+        HStack(spacing: 6) {
+
+            Circle()
+                .fill(statusColor)
+                .frame(
+                    width: 9,
+                    height: 9
+                )
+
+            Text(statusText)
+                .font(.caption)
+                .bold()
+        }
+    }
+
+    // ============================================================
+    // MARK: - STATUS COLOR
+    // ============================================================
+
+    private var statusColor: Color {
+
+        if engine.isRunning {
+            return .orange
+        }
+
+        if simulationComplete {
+            return .green
+        }
+
+        if chargingHasStarted {
+            return .blue
+        }
+
+        return .gray
+    }
+
+    // ============================================================
+    // MARK: - STATUS TEXT
+    // ============================================================
+
+    private var statusText: String {
+
+        if engine.isRunning {
+            return "RUNNING"
+        }
+
+        if simulationComplete {
+            return "COMPLETE"
+        }
+
+        if chargingHasStarted {
+            return "ACTIVE"
+        }
+
+        return "READY"
+    }
+
+    // ============================================================
+    // MARK: - PRIMARY CHARGE CARD
+    // ============================================================
+
+    private var primaryChargeCard: some View {
+
+        VStack(
+            alignment: .leading,
+            spacing: 10
+        ) {
+
+            HStack {
+
+                HStack(spacing: 7) {
+
+                    Image(
+                        systemName: "battery.100"
+                    )
+                    .foregroundStyle(.blue)
+
+                    Text("BATTERY CHARGE")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Text(
+                    String(
+                        format: "%.1f%%",
+                        chargePercent
+                    )
+                )
+                .font(.title)
+                .bold()
+                .monospacedDigit()
+            }
+
+            GeometryReader { geometry in
+
+                ZStack(alignment: .leading) {
+
+                    RoundedRectangle(
+                        cornerRadius: 8
+                    )
+                    .fill(
+                        Color.gray.opacity(0.20)
+                    )
+
+                    RoundedRectangle(
+                        cornerRadius: 8
+                    )
+                    .fill(
+                        simulationComplete
+                        ? Color.green
+                        : Color.blue
+                    )
+                    .frame(
+                        width:
+                            geometry.size.width *
+                            CGFloat(
+                                chargePercent / 100.0
+                            )
+                    )
+                }
+            }
+            .frame(height: 18)
+
+            HStack {
+
+                Text("0%")
+
+                Spacer()
+
+                Text("50%")
+
+                Spacer()
+
+                Text("100%")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(
+                cornerRadius: 12
+            )
+            .fill(
+                Color.gray.opacity(0.10)
+            )
+        )
+    }
+
+    // ============================================================
+    // MARK: - INDICATOR CARD
+    // ============================================================
+
+    private func indicatorCard(
+        title: String,
+        value: String,
+        systemImage: String
+    ) -> some View {
+
+        VStack(
+            alignment: .leading,
+            spacing: 6
+        ) {
+
+            HStack(spacing: 5) {
+
+                Image(systemName: systemImage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(value)
+                .font(.title3)
+                .bold()
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(
+            maxWidth: .infinity,
+            alignment: .leading
+        )
+        .padding(10)
+        .background(
+            RoundedRectangle(
+                cornerRadius: 10
+            )
+            .fill(
+                Color.gray.opacity(0.10)
+            )
+        )
+    }
+
+    // ============================================================
+    // MARK: - PROGRESS TARGET CARD
+    // ============================================================
+
+    private func progressTargetCard(
+        title: String,
+        progress: Double
+    ) -> some View {
+
+        let clampedProgress =
+            min(
+                max(progress, 0.0),
+                100.0
+            )
+
+        let reached =
+            clampedProgress >= 100.0
+
+        return VStack(
+            alignment: .leading,
+            spacing: 7
+        ) {
+
+            HStack {
+
+                Text(title)
+                    .font(.caption)
+                    .bold()
+
+                Spacer()
+
+                Text(
+                    String(
+                        format: "%.1f%%",
+                        clampedProgress
+                    )
+                )
+                .font(.caption)
+                .bold()
+                .monospacedDigit()
+            }
+
+            GeometryReader { geometry in
+
+                ZStack(alignment: .leading) {
+
+                    RoundedRectangle(
+                        cornerRadius: 6
+                    )
+                    .fill(
+                        Color.gray.opacity(0.20)
+                    )
+
+                    RoundedRectangle(
+                        cornerRadius: 6
+                    )
+                    .fill(
+                        reached
+                        ? Color.green
+                        : Color.blue
+                    )
+                    .frame(
+                        width:
+                            geometry.size.width *
+                            CGFloat(
+                                clampedProgress / 100.0
+                            )
+                    )
+                }
+            }
+            .frame(height: 10)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(
+                cornerRadius: 10
+            )
+            .fill(
+                Color.gray.opacity(0.10)
+            )
+        )
+    }
+
+    // ============================================================
+    // MARK: - MODEL RESULT CARD
+    // ============================================================
+
+
+
+  
+
+    // ============================================================
+    // MARK: - MODEL RESULT SYMBOL
+    // ============================================================
+
+    private var modelResultSymbol: String {
+
+        if !chargingHasStarted {
+            return "questionmark.circle"
+        }
+
+        if engine.isRunning {
+            return "arrow.triangle.2.circlepath"
+        }
+
+        return engine.result.overallPass
+            ? "checkmark.circle.fill"
+            : "xmark.circle.fill"
+    }
+
+    // ============================================================
+    // MARK: - MODEL RESULT COLOR
+    // ============================================================
+
+    private var modelResultColor: Color {
+
+        if !chargingHasStarted {
+            return .secondary
+        }
+
+        if engine.isRunning {
+            return .orange
+        }
+
+        return engine.result.overallPass
+            ? .green
+            : .red
+    }
+
+    // ============================================================
+    // MARK: - TARGET PANEL
     // ============================================================
 
     private var targetPanel: some View {
 
         GroupBox("BATTERY TARGETS") {
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(
+                alignment: .leading,
+                spacing: 8
+            ) {
 
                 targetRow(
                     name: "Target Energy",
-                    value: "\(QRTLConstants.targetEnergyKWh) kWh"
+                    value:
+                        "\(QRTLConstants.targetEnergyKWh) kWh"
                 )
 
                 targetRow(
                     name: "Target Charge Power",
                     value: String(
                         format: "%.1f MW",
-                        QRTLConstants.targetChargePowerW / 1_000_000.0
+                        QRTLConstants.targetChargePowerW /
+                        1_000_000.0
                     )
                 )
 
@@ -156,18 +698,17 @@ struct ContentView: View {
     }
 
     // ============================================================
-    // BATTERY CHARGE BAR
-    // ============================================================
-
-    // ============================================================
-    // BATTERY CHARGE BAR
+    // MARK: - BATTERY CHARGE PANEL
     // ============================================================
 
     private var chargePanel: some View {
 
         GroupBox("BATTERY CHARGE") {
 
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(
+                alignment: .leading,
+                spacing: 12
+            ) {
 
                 HStack {
 
@@ -183,10 +724,6 @@ struct ContentView: View {
                     .bold()
                     .monospacedDigit()
                 }
-
-                // ====================================================
-                // ELAPSED CHARGE TIME
-                // ====================================================
 
                 HStack {
 
@@ -207,28 +744,28 @@ struct ContentView: View {
 
                     ZStack(alignment: .leading) {
 
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.gray.opacity(0.20))
+                        RoundedRectangle(
+                            cornerRadius: 10
+                        )
+                        .fill(
+                            Color.gray.opacity(0.20)
+                        )
 
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(
-                                chargePercent >= 99.9
-                                ? Color.green
-                                : Color.blue
-                            )
-                            .frame(
-                                width:
-                                    geometry.size.width *
-                                    CGFloat(
-                                        min(
-                                            max(
-                                                chargePercent / 100.0,
-                                                0.0
-                                            ),
-                                            1.0
-                                        )
-                                    )
-                            )
+                        RoundedRectangle(
+                            cornerRadius: 10
+                        )
+                        .fill(
+                            simulationComplete
+                            ? Color.green
+                            : Color.blue
+                        )
+                        .frame(
+                            width:
+                                geometry.size.width *
+                                CGFloat(
+                                    chargePercent / 100.0
+                                )
+                        )
                     }
                 }
                 .frame(height: 24)
@@ -251,21 +788,13 @@ struct ContentView: View {
                 HStack {
 
                     Circle()
-                        .fill(
-                            chargePercent >= 99.9
-                            ? Color.green
-                            : Color.blue
+                        .fill(statusColor)
+                        .frame(
+                            width: 8,
+                            height: 8
                         )
-                        .frame(width: 8, height: 8)
 
-                    if chargePercent >= 99.9 {
-
-                        Text("Charge complete")
-
-                    } else {
-
-                        Text("Charging")
-                    }
+                    Text(statusText)
 
                     Spacer()
 
@@ -280,15 +809,18 @@ struct ContentView: View {
     }
 
     // ============================================================
-    // CA GRID
+    // MARK: - CA GRID
     // ============================================================
 
     private var caPanel: some View {
 
         GroupBox("CELLULAR AUTOMATON") {
 
-            let width = QRTLConstants.caWidth
-            let height = QRTLConstants.caHeight
+            let width =
+                QRTLConstants.caWidth
+
+            let height =
+                QRTLConstants.caHeight
 
             LazyVGrid(
                 columns: Array(
@@ -313,7 +845,11 @@ struct ContentView: View {
                             engine.cells[index]
 
                         Rectangle()
-                            .fill(color(for: cell))
+                            .fill(
+                                color(
+                                    for: cell
+                                )
+                            )
                             .aspectRatio(
                                 1,
                                 contentMode: .fit
@@ -326,7 +862,7 @@ struct ContentView: View {
     }
 
     // ============================================================
-    // CELL COLOR
+    // MARK: - CELL COLOR
     // ============================================================
 
     private func color(
@@ -356,18 +892,24 @@ struct ContentView: View {
     }
 
     // ============================================================
-    // RESULT PANEL
+    // MARK: - RESULT PANEL
     // ============================================================
 
     private var resultPanel: some View {
 
         GroupBox("SIMULATION RESULT") {
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(
+                alignment: .leading,
+                spacing: 8
+            ) {
 
                 if !chargingHasStarted {
 
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(
+                        alignment: .leading,
+                        spacing: 8
+                    ) {
 
                         Text("NOT EVALUATED")
                             .font(.title2)
@@ -502,7 +1044,8 @@ struct ContentView: View {
                         "Maximum Stress",
                         String(
                             format: "%.1f MPa",
-                            engine.result.maximumStressMPa / 1_000_000.0
+                            engine.result.maximumStressMPa /
+                            1_000_000.0
                         )
                     )
 
@@ -524,7 +1067,10 @@ struct ContentView: View {
                     if !engine.result.overallPass &&
                         !engine.result.failureReasons.isEmpty {
 
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(
+                            alignment: .leading,
+                            spacing: 4
+                        ) {
 
                             Text("Failure Reasons")
                                 .font(.headline)
@@ -534,9 +1080,11 @@ struct ContentView: View {
                                 id: \.self
                             ) { reason in
 
-                                Text("• \(reason)")
-                                    .font(.caption)
-                                    .foregroundStyle(.red)
+                                Text(
+                                    "• \(reason)"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.red)
                             }
                         }
                     }
@@ -546,14 +1094,17 @@ struct ContentView: View {
     }
 
     // ============================================================
-    // EQUATIONS
+    // MARK: - EQUATIONS
     // ============================================================
 
     private var equationPanel: some View {
 
         GroupBox("MODEL EQUATIONS") {
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(
+                alignment: .leading,
+                spacing: 8
+            ) {
 
                 Text("SOC")
                     .bold()
@@ -602,14 +1153,17 @@ struct ContentView: View {
     }
 
     // ============================================================
-    // ASSUMPTIONS
+    // MARK: - ASSUMPTIONS
     // ============================================================
 
     private var assumptionsPanel: some View {
 
         GroupBox("ASSUMPTIONS") {
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(
+                alignment: .leading,
+                spacing: 6
+            ) {
 
                 Text(
                     "This is a reduced-order computational model."
@@ -633,7 +1187,7 @@ struct ContentView: View {
     }
 
     // ============================================================
-    // ROW HELPERS
+    // MARK: - ROW HELPERS
     // ============================================================
 
     private func targetRow(
